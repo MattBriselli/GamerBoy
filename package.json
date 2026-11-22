@@ -24,7 +24,9 @@
     "start": "expo start",
     "android": "expo start --android",
     "ios": "expo start --ios",
-    "web": "expo start --web"
+    "web": "expo start --web",
+    "typecheck": "tsc --noEmit",
+    "test": "tsc --ignoreConfig tests/engine.test.ts --outDir /tmp/gamerboy-tests --module commonjs --target es2022 --esModuleInterop && node /tmp/gamerboy-tests/tests/engine.test.js"
   },
   "private": true
 }
