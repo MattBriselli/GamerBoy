@@ -105,7 +105,6 @@ export const PlayingCard = memo(function PlayingCard({
           borderColor:
             highlighted || selected ? theme.hintGlow : theme.cardBorder,
           borderWidth: highlighted || selected ? 2.2 : 1,
-          transform: selected ? [{ scale: 1.03 }] : undefined,
         },
       ]}
     >
