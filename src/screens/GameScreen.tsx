@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Modal,
   Pressable,
@@ -10,11 +10,7 @@ import { LinearGradient } from 'expo-linear-gradient';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { AdBanner } from '../components/AdBanner';
 import { BottomToolbar } from '../components/BottomToolbar';
-import {
-  DragOriginMap,
-  GameBoard,
-  GameBoardHandle,
-} from '../components/GameBoard';
+import { GameBoard } from '../components/GameBoard';
 import { formatDuration, TopHud } from '../components/TopHud';
 import {
   canAutoComplete,
@@ -22,6 +18,7 @@ import {
   executeMove,
   findHint,
   findSmartMoveForLocation,
+  getMovingCards,
   HintSuggestion,
   stepAutoComplete,
   undoMove,
@@ -49,6 +46,8 @@ export interface GameScreenProps {
   onOpenStats: () => void;
 }
 
+const EMPTY_SET: ReadonlySet<string> = new Set();
+
 export function GameScreen({
   game,
   theme,
@@ -65,14 +64,20 @@ export function GameScreen({
   const [activeHint, setActiveHint] = useState<HintSuggestion | null>(null);
   const [isAutoCompleting, setIsAutoCompleting] = useState(false);
   const [dealMenuVisible, setDealMenuVisible] = useState(false);
+  const [elevatedIds, setElevatedIds] = useState<ReadonlySet<string>>(EMPTY_SET);
+  const [liveSeconds, setLiveSeconds] = useState(game.elapsedSeconds);
 
-  const boardRef = useRef<GameBoardHandle | null>(null);
   const wonReportedSeedRef = useRef<string | null>(null);
   const latestGameRef = useRef(game);
+  const liveSecondsRef = useRef(liveSeconds);
 
   useEffect(() => {
     latestGameRef.current = game;
   }, [game]);
+
+  useEffect(() => {
+    liveSecondsRef.current = liveSeconds;
+  }, [liveSeconds]);
 
   // Report win once per completed deal
   useEffect(() => {
@@ -80,22 +85,20 @@ export function GameScreen({
     if (game.isWon && wonReportedSeedRef.current !== winKey) {
       wonReportedSeedRef.current = winKey;
       triggerSuccessHaptic(hapticsEnabled);
-      onGameWon(game);
+      onGameWon({ ...game, elapsedSeconds: liveSecondsRef.current });
     }
   }, [game.isWon, game, hapticsEnabled, onGameWon]);
 
   const hasMoves = game.moves > 0;
 
-  // Game clock starts after first move and pauses on win or modal
+  // Lightweight local 1-second clock — updates TopHud ONLY without re-rendering GameBoard!
   useEffect(() => {
     if (game.isWon || !hasMoves || dealMenuVisible) return;
     const timer = setInterval(() => {
-      onUpdateGame((prev) =>
-        prev.isWon ? prev : { ...prev, elapsedSeconds: prev.elapsedSeconds + 1 }
-      );
+      setLiveSeconds((s) => s + 1);
     }, 1000);
     return () => clearInterval(timer);
-  }, [game.isWon, hasMoves, dealMenuVisible, onUpdateGame]);
+  }, [game.isWon, hasMoves, dealMenuVisible]);
 
   // Auto-clear hint highlight after 3.2s
   useEffect(() => {
@@ -104,7 +107,7 @@ export function GameScreen({
     return () => clearTimeout(t);
   }, [activeHint]);
 
-  // Cascading Auto-Complete stepper with smooth overlapping card flights
+  // Cascading Auto-Complete stepper
   useEffect(() => {
     if (!isAutoCompleting || game.isWon) return;
     const stepTimer = setTimeout(() => {
@@ -114,85 +117,154 @@ export function GameScreen({
         setIsAutoCompleting(false);
         return;
       }
+      // Find which card just landed on a foundation so it stays elevated during flight
+      const prevFoundationIds = new Set(
+        current.foundations.flatMap((p) => p.map((c) => c.id))
+      );
+      const newlyPlaced = next.foundations
+        .flatMap((p) => p.map((c) => c.id))
+        .filter((id) => !prevFoundationIds.has(id));
+
+      if (newlyPlaced.length > 0) {
+        setElevatedIds(new Set(newlyPlaced));
+      }
       triggerLightHaptic(hapticsEnabled);
-      boardRef.current?.animateTransition(current, next);
-      onUpdateGame(() => next);
-    }, 95);
+      onUpdateGame(() => ({
+        ...next,
+        elapsedSeconds: liveSecondsRef.current,
+      }));
+    }, 105);
     return () => clearTimeout(stepTimer);
   }, [isAutoCompleting, game, hapticsEnabled, onUpdateGame]);
 
   const autoCompleteReady = useMemo(() => canAutoComplete(game), [game]);
 
-  const triggerFreshDealWithAnim = (dealFactory: () => GameState) => {
+  const triggerFreshDeal = (dealFactory: () => GameState) => {
     setDealMenuVisible(false);
     setIsAutoCompleting(false);
     setActiveHint(null);
+    setElevatedIds(EMPTY_SET);
     const fresh = dealFactory();
-    boardRef.current?.animateFreshDeal(fresh);
+    setLiveSeconds(fresh.elapsedSeconds);
   };
 
-  const handleStockPress = () => {
-    if (isAutoCompleting || game.isWon) return;
+  const handleElevateIds = useCallback((ids: string[]) => {
+    setElevatedIds(ids.length > 0 ? new Set(ids) : EMPTY_SET);
+  }, []);
+
+  const handleStockPress = useCallback(() => {
+    const cur = latestGameRef.current;
+    if (cur.isWon) return;
     setActiveHint(null);
-    const next = drawOrRecycleStock(game);
-    if (next !== game) {
+
+    const movedIds =
+      cur.stock.length > 0
+        ? cur.stock.slice(-cur.drawMode).map((c) => c.id)
+        : cur.waste.slice(-2).map((c) => c.id);
+
+    const next = drawOrRecycleStock(cur);
+    if (next !== cur) {
+      setElevatedIds(new Set(movedIds));
       triggerLightHaptic(hapticsEnabled);
-      boardRef.current?.animateTransition(game, next);
-      onUpdateGame(() => next);
+      onUpdateGame(() => ({
+        ...next,
+        elapsedSeconds: liveSecondsRef.current,
+      }));
     }
-  };
+  }, [hapticsEnabled, onUpdateGame]);
 
-  const handleSmartTap = (from: PileLocation) => {
-    if (isAutoCompleting || game.isWon) return;
-    setActiveHint(null);
+  const handleSmartTap = useCallback(
+    (from: PileLocation) => {
+      const cur = latestGameRef.current;
+      if (cur.isWon) return;
+      setActiveHint(null);
 
-    const target = findSmartMoveForLocation(game, from);
-    if (!target) {
-      triggerWarningHaptic(hapticsEnabled);
-      return;
-    }
-
-    const next = executeMove(game, from, target);
-    if (next) {
-      if (target.zone === 'foundation') {
-        triggerMediumHaptic(hapticsEnabled);
-      } else {
-        triggerLightHaptic(hapticsEnabled);
+      const target = findSmartMoveForLocation(cur, from);
+      if (!target) {
+        triggerWarningHaptic(hapticsEnabled);
+        return;
       }
-      boardRef.current?.animateTransition(game, next);
-      onUpdateGame(() => next);
-    }
-  };
 
-  const handleDropMove = (
-    from: PileLocation,
-    to: PileLocation,
-    dragOrigins: DragOriginMap
-  ) => {
-    if (isAutoCompleting || game.isWon) return;
-    setActiveHint(null);
-
-    const next = executeMove(game, from, to);
-    if (next) {
-      if (to.zone === 'foundation') {
-        triggerMediumHaptic(hapticsEnabled);
-      } else {
-        triggerLightHaptic(hapticsEnabled);
+      const moving = getMovingCards(cur, from) ?? [];
+      const next = executeMove(cur, from, target);
+      if (next) {
+        setElevatedIds(new Set(moving.map((c) => c.id)));
+        if (target.zone === 'foundation') {
+          triggerMediumHaptic(hapticsEnabled);
+        } else {
+          triggerLightHaptic(hapticsEnabled);
+        }
+        onUpdateGame(() => ({
+          ...next,
+          elapsedSeconds: liveSecondsRef.current,
+        }));
       }
-      boardRef.current?.animateTransition(game, next, dragOrigins);
-      onUpdateGame(() => next);
-    } else {
-      triggerWarningHaptic(hapticsEnabled);
-    }
-  };
+    },
+    [hapticsEnabled, onUpdateGame]
+  );
+
+  const handleDropMove = useCallback(
+    (from: PileLocation, to: PileLocation) => {
+      const cur = latestGameRef.current;
+      if (cur.isWon) return;
+      setActiveHint(null);
+
+      const moving = getMovingCards(cur, from) ?? [];
+      const next = executeMove(cur, from, to);
+      if (next) {
+        setElevatedIds(new Set(moving.map((c) => c.id)));
+        if (to.zone === 'foundation') {
+          triggerMediumHaptic(hapticsEnabled);
+        } else {
+          triggerLightHaptic(hapticsEnabled);
+        }
+        onUpdateGame(() => ({
+          ...next,
+          elapsedSeconds: liveSecondsRef.current,
+        }));
+      } else {
+        triggerWarningHaptic(hapticsEnabled);
+      }
+    },
+    [hapticsEnabled, onUpdateGame]
+  );
 
   const handleUndo = () => {
     if (isAutoCompleting || game.history.length === 0) return;
     setActiveHint(null);
     const next = undoMove(game);
+
+    // Elevate cards whose zone/column changed during undo so they fly cleanly above piles
+    const prevZoneOf = new Map<string, string>();
+    game.stock.forEach((c) => prevZoneOf.set(c.id, 's'));
+    game.waste.forEach((c) => prevZoneOf.set(c.id, 'w'));
+    game.foundations.forEach((p, i) => p.forEach((c) => prevZoneOf.set(c.id, `f${i}`)));
+    game.tableau.forEach((p, i) => p.forEach((c) => prevZoneOf.set(c.id, `t${i}`)));
+
+    const movedBack: string[] = [];
+    next.stock.slice(-2).forEach((c) => {
+      if (prevZoneOf.get(c.id) !== 's') movedBack.push(c.id);
+    });
+    next.waste.slice(-3).forEach((c) => {
+      if (prevZoneOf.get(c.id) !== 'w') movedBack.push(c.id);
+    });
+    next.foundations.forEach((p, i) =>
+      p.forEach((c) => {
+        if (prevZoneOf.get(c.id) !== `f${i}`) movedBack.push(c.id);
+      })
+    );
+    next.tableau.forEach((p, i) =>
+      p.forEach((c) => {
+        if (prevZoneOf.get(c.id) !== `t${i}`) movedBack.push(c.id);
+      })
+    );
+    setElevatedIds(movedBack.length > 0 ? new Set(movedBack) : EMPTY_SET);
+
     triggerLightHaptic(hapticsEnabled);
-    boardRef.current?.animateTransition(game, next);
-    onUpdateGame(() => next);
+    onUpdateGame(() => ({
+      ...next,
+      elapsedSeconds: liveSecondsRef.current,
+    }));
   };
 
   const handleHint = () => {
@@ -210,6 +282,16 @@ export function GameScreen({
     }
   };
 
+  const handleLeaveToMenu = () => {
+    if (!game.isWon && liveSecondsRef.current !== game.elapsedSeconds) {
+      onUpdateGame((prev) => ({
+        ...prev,
+        elapsedSeconds: liveSecondsRef.current,
+      }));
+    }
+    onBackToMenu();
+  };
+
   const isNewHighScore = game.isWon && game.score >= highScore && game.score > 0;
 
   return (
@@ -219,19 +301,20 @@ export function GameScreen({
           theme={theme}
           score={game.score}
           moves={game.moves}
-          elapsedSeconds={game.elapsedSeconds}
+          elapsedSeconds={liveSeconds}
           dealType={game.dealType}
           drawMode={game.drawMode}
           dailyDate={game.dailyDate}
-          onBackToMenu={onBackToMenu}
+          onBackToMenu={handleLeaveToMenu}
           onOpenStats={onOpenStats}
         />
 
         <GameBoard
-          ref={boardRef}
           game={game}
           theme={theme}
           activeHint={activeHint}
+          elevatedIds={elevatedIds}
+          onElevateIds={handleElevateIds}
           onStockPress={handleStockPress}
           onSmartTap={handleSmartTap}
           onDropMove={handleDropMove}
@@ -281,7 +364,7 @@ export function GameScreen({
             </Text>
 
             <Pressable
-              onPress={() => triggerFreshDealWithAnim(onNewWinningDeal)}
+              onPress={() => triggerFreshDeal(onNewWinningDeal)}
               style={[styles.sheetPrimaryBtn, { backgroundColor: theme.accent }]}
             >
               <Text style={[styles.sheetPrimaryText, { color: theme.accentText }]}>
@@ -290,7 +373,7 @@ export function GameScreen({
             </Pressable>
 
             <Pressable
-              onPress={() => triggerFreshDealWithAnim(onNewStandardDeal)}
+              onPress={() => triggerFreshDeal(onNewStandardDeal)}
               style={[
                 styles.sheetOptionBtn,
                 { backgroundColor: theme.surface, borderColor: theme.surfaceBorder },
@@ -302,7 +385,7 @@ export function GameScreen({
             </Pressable>
 
             <Pressable
-              onPress={() => triggerFreshDealWithAnim(onReplayCurrentSeed)}
+              onPress={() => triggerFreshDeal(onReplayCurrentSeed)}
               style={[
                 styles.sheetOptionBtn,
                 { backgroundColor: theme.surface, borderColor: theme.surfaceBorder },
@@ -330,7 +413,7 @@ export function GameScreen({
         visible={game.isWon}
         transparent
         animationType="fade"
-        onRequestClose={onBackToMenu}
+        onRequestClose={handleLeaveToMenu}
       >
         <View style={styles.backdrop}>
           <View
@@ -377,7 +460,7 @@ export function GameScreen({
                   TIME
                 </Text>
                 <Text style={[styles.victoryStatVal, { color: theme.textPrimary }]}>
-                  {formatDuration(game.elapsedSeconds)}
+                  {formatDuration(liveSeconds)}
                 </Text>
               </View>
               <View style={styles.victoryStatCol}>
@@ -391,7 +474,7 @@ export function GameScreen({
             </View>
 
             <Pressable
-              onPress={() => triggerFreshDealWithAnim(onNewWinningDeal)}
+              onPress={() => triggerFreshDeal(onNewWinningDeal)}
               style={[
                 styles.sheetPrimaryBtn,
                 { backgroundColor: theme.accent, width: '100%' },
@@ -403,7 +486,7 @@ export function GameScreen({
             </Pressable>
 
             <Pressable
-              onPress={onBackToMenu}
+              onPress={handleLeaveToMenu}
               style={[
                 styles.sheetOptionBtn,
                 {

@@ -1,8 +1,7 @@
 import React, {
-  forwardRef,
-  useCallback,
+  memo,
   useEffect,
-  useImperativeHandle,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -13,14 +12,12 @@ import {
   LayoutChangeEvent,
   PanResponder,
   Platform,
-  Pressable,
-  StyleProp,
   StyleSheet,
   Text,
   View,
-  ViewStyle,
 } from 'react-native';
 import {
+  createOrderedDeck,
   getMovingCards,
   HintSuggestion,
   isValidMove,
@@ -29,1247 +26,817 @@ import { Card, GameState, PileLocation } from '../engine/types';
 import { AppTheme } from '../theme/themes';
 import {
   BoardMetrics,
+  CardBoardPose,
   computeAllCardPoses,
   computeBoardMetrics,
-  computeColumnOffsets,
 } from './boardGeometry';
 import { PlayingCard } from './PlayingCard';
 
 const USE_NATIVE_DRIVER = Platform.OS !== 'web';
 const FOUNDATION_WATERMARKS = ['♠', '♥', '♣', '♦'];
-
-export interface DragOriginMap {
-  [cardId: string]: { x: number; y: number };
-}
-
-export interface GameBoardHandle {
-  animateTransition: (
-    prevGame: GameState,
-    nextGame: GameState,
-    customOrigins?: DragOriginMap
-  ) => void;
-  animateFreshDeal: (nextGame: GameState) => void;
-}
+const ORDERED_CARDS = createOrderedDeck();
 
 export interface GameBoardProps {
   game: GameState;
   theme: AppTheme;
   activeHint: HintSuggestion | null;
+  elevatedIds: ReadonlySet<string>;
+  onElevateIds: (ids: string[]) => void;
   onStockPress: () => void;
   onSmartTap: (from: PileLocation) => void;
-  onDropMove: (
-    from: PileLocation,
-    to: PileLocation,
-    dragOrigins: DragOriginMap
-  ) => void;
+  onDropMove: (from: PileLocation, to: PileLocation) => void;
 }
 
-interface DragSession {
-  from: PileLocation;
-  cards: Card[];
-  originX: number;
-  originY: number;
-  cardOffsetY: number;
+interface CardAnimController {
+  x: Animated.Value;
+  y: Animated.Value;
+  scale: Animated.Value;
+  flipScaleX: Animated.Value;
+  currentX: number;
+  currentY: number;
+  initialized: boolean;
+  lastFaceUp: boolean;
 }
 
-interface FlightAnimItem {
-  key: string;
-  card: Card;
-  fromX: number;
-  fromY: number;
-  toX: number;
-  toY: number;
-  arcLift: number;
-  peakScale: number;
-  flipFromBack: boolean;
-  flipToBack: boolean;
-  zOrder: number;
-  progress: Animated.Value;
+type HitResult =
+  | { type: 'stock' }
+  | { type: 'card'; from: PileLocation; cards: Card[] }
+  | null;
+
+interface ActiveGesture {
+  hit: HitResult;
+  dragging: boolean;
+  basePositions: { id: string; x: number; y: number }[];
 }
 
-interface FlipAnimItem {
-  key: string;
-  card: Card;
-  x: number;
-  y: number;
-  toFaceUp: boolean;
-  progress: Animated.Value;
-}
-
-interface InteractiveCardSlotProps {
-  from: PileLocation;
-  originX: number;
-  originY: number;
-  cardOffsetY?: number;
-  style?: StyleProp<ViewStyle>;
-  onGestureStartCheck: (from: PileLocation) => boolean;
-  onGestureMove: (
-    from: PileLocation,
-    originX: number,
-    originY: number,
-    cardOffsetY: number,
-    dx: number,
-    dy: number
-  ) => void;
-  onGestureRelease: (from: PileLocation, dx: number, dy: number) => void;
-  onGestureTerminate: () => void;
-  children: React.ReactNode;
-}
-
-function InteractiveCardSlot({
-  from,
-  originX,
-  originY,
-  cardOffsetY = 22,
-  style,
-  onGestureStartCheck,
-  onGestureMove,
-  onGestureRelease,
-  onGestureTerminate,
-  children,
-}: InteractiveCardSlotProps) {
-  const panHandlers = useMemo(() => {
-    const responder = PanResponder.create({
-      onStartShouldSetPanResponder: () => onGestureStartCheck(from),
-      onMoveShouldSetPanResponder: (_, gesture) =>
-        Math.hypot(gesture.dx, gesture.dy) > 5,
-      onPanResponderMove: (_, gesture) => {
-        onGestureMove(
-          from,
-          originX,
-          originY,
-          cardOffsetY,
-          gesture.dx,
-          gesture.dy
-        );
-      },
-      onPanResponderRelease: (_, gesture) => {
-        onGestureRelease(from, gesture.dx, gesture.dy);
-      },
-      onPanResponderTerminate: () => {
-        onGestureTerminate();
-      },
-    });
-    return responder.panHandlers;
-  }, [
-    from,
-    originX,
-    originY,
-    cardOffsetY,
-    onGestureStartCheck,
-    onGestureMove,
-    onGestureRelease,
-    onGestureTerminate,
-  ]);
-
-  return (
-    <View {...panHandlers} style={style}>
-      {children}
-    </View>
-  );
-}
-
-function collectCardsMap(state: GameState): Map<string, Card> {
-  const map = new Map<string, Card>();
-  state.stock.forEach((c) => map.set(c.id, c));
-  state.waste.forEach((c) => map.set(c.id, c));
-  state.foundations.forEach((p) => p.forEach((c) => map.set(c.id, c)));
-  state.tableau.forEach((p) => p.forEach((c) => map.set(c.id, c)));
+function createAnimControllers(): Record<string, CardAnimController> {
+  const map: Record<string, CardAnimController> = {};
+  for (const c of ORDERED_CARDS) {
+    map[c.id] = {
+      x: new Animated.Value(0),
+      y: new Animated.Value(0),
+      scale: new Animated.Value(1),
+      flipScaleX: new Animated.Value(1),
+      currentX: 0,
+      currentY: 0,
+      initialized: false,
+      lastFaceUp: false,
+    };
+  }
   return map;
 }
 
-export const GameBoard = forwardRef<GameBoardHandle, GameBoardProps>(
-  function GameBoard(
-    { game, theme, activeHint, onStockPress, onSmartTap, onDropMove },
-    ref
-  ) {
-    const [layout, setLayout] = useState({ width: 375, height: 520 });
-    const [dragSession, setDragSession] = useState<DragSession | null>(null);
-    const [hoverTarget, setHoverTarget] = useState<PileLocation | null>(null);
-    const [dragPan] = useState(() => new Animated.ValueXY({ x: 0, y: 0 }));
+function collectCardsRecord(state: GameState): Record<string, Card> {
+  const rec: Record<string, Card> = {};
+  for (const c of state.stock) rec[c.id] = c;
+  for (const c of state.waste) rec[c.id] = c;
+  for (const p of state.foundations) {
+    for (const c of p) rec[c.id] = c;
+  }
+  for (const p of state.tableau) {
+    for (const c of p) rec[c.id] = c;
+  }
+  return rec;
+}
 
-    const [flights, setFlights] = useState<FlightAnimItem[]>([]);
-    const [flips, setFlips] = useState<FlipAnimItem[]>([]);
-    const [foundationPulses] = useState(() => [
-      new Animated.Value(1),
-      new Animated.Value(1),
-      new Animated.Value(1),
-      new Animated.Value(1),
-    ]);
+function hitTestBoard(
+  bx: number,
+  by: number,
+  game: GameState,
+  m: BoardMetrics,
+  poses: Map<string, CardBoardPose>
+): HitResult {
+  // 1. Top row: Stock, Waste, Foundations
+  if (by >= m.topPadding - 8 && by <= m.topPadding + m.cardHeight + 8) {
+    // Stock slot (col 0)
+    if (bx >= m.colX(0) - 6 && bx <= m.colX(0) + m.cardWidth + 6) {
+      return { type: 'stock' };
+    }
 
-    const dragSessionRef = useRef<DragSession | null>(null);
-    const animCounterRef = useRef(0);
-    const lastDealtKeyRef = useRef<string | null>(null);
+    // Top Waste card
+    if (game.waste.length > 0) {
+      const topWaste = game.waste[game.waste.length - 1];
+      const wPose = poses.get(topWaste.id);
+      if (
+        wPose &&
+        bx >= wPose.x - 4 &&
+        bx <= wPose.x + m.cardWidth + 4
+      ) {
+        return {
+          type: 'card',
+          from: { zone: 'waste' },
+          cards: [topWaste],
+        };
+      }
+    }
 
-    const metrics: BoardMetrics = useMemo(
-      () => computeBoardMetrics(layout.width, layout.height),
-      [layout.width, layout.height]
-    );
+    // Foundations 0..3 (cols 3..6)
+    for (let f = 0; f < 4; f++) {
+      const fx = m.colX(3 + f);
+      if (bx >= fx - 4 && bx <= fx + m.cardWidth + 4) {
+        const pile = game.foundations[f];
+        if (pile.length > 0) {
+          return {
+            type: 'card',
+            from: { zone: 'foundation', index: f },
+            cards: [pile[pile.length - 1]],
+          };
+        }
+      }
+    }
+  }
 
-    const gameRef = useRef(game);
-    const metricsRef = useRef(metrics);
+  // 2. Tableau columns 0..6 (walk top-most card down to index 0)
+  if (by >= m.tableauTop - 8) {
+    for (let col = 0; col < 7; col++) {
+      const cx = m.colX(col);
+      if (bx >= cx - m.colGap * 0.5 && bx <= cx + m.cardWidth + m.colGap * 0.5) {
+        const pile = game.tableau[col];
+        for (let cIdx = pile.length - 1; cIdx >= 0; cIdx--) {
+          const card = pile[cIdx];
+          const pose = poses.get(card.id);
+          if (!pose) continue;
+          if (by >= pose.y && by <= pose.y + m.cardHeight) {
+            if (!card.faceUp) return null;
+            const from: PileLocation = {
+              zone: 'tableau',
+              index: col,
+              cardIndex: cIdx,
+            };
+            const moving = getMovingCards(game, from);
+            if (moving && moving.length > 0) {
+              return { type: 'card', from, cards: moving };
+            }
+            return null;
+          }
+        }
+      }
+    }
+  }
 
-    useEffect(() => {
-      gameRef.current = game;
-      metricsRef.current = metrics;
-    }, [game, metrics]);
+  return null;
+}
 
-    const pulseFoundation = useCallback(
-      (fIdx: number) => {
-        const val = foundationPulses[fIdx];
-        if (!val) return;
-        val.setValue(1);
-        Animated.sequence([
-          Animated.timing(val, {
-            toValue: 1.075,
-            duration: 90,
-            easing: Easing.out(Easing.quad),
+function computeDropTarget(
+  game: GameState,
+  m: BoardMetrics,
+  from: PileLocation,
+  centerX: number,
+  centerY: number
+): PileLocation | null {
+  if (centerY < m.tableauTop - m.sectionGap * 0.25) {
+    let bestFoundation: { loc: PileLocation; dist: number } | null = null;
+    for (let f = 0; f < 4; f++) {
+      const slotCenterX = m.colX(3 + f) + m.cardWidth / 2;
+      const slotCenterY = m.topPadding + m.cardHeight / 2;
+      const dist = Math.hypot(centerX - slotCenterX, centerY - slotCenterY);
+      const candidate: PileLocation = { zone: 'foundation', index: f };
+      if (dist < m.cardWidth * 1.15 && isValidMove(game, from, candidate)) {
+        if (!bestFoundation || dist < bestFoundation.dist) {
+          bestFoundation = { loc: candidate, dist };
+        }
+      }
+    }
+    if (bestFoundation) return bestFoundation.loc;
+  }
+
+  let bestTableau: { loc: PileLocation; dist: number } | null = null;
+  for (let col = 0; col < 7; col++) {
+    const slotCenterX = m.colX(col) + m.cardWidth / 2;
+    const dist = Math.abs(centerX - slotCenterX);
+    const candidate: PileLocation = { zone: 'tableau', index: col };
+    if (dist < m.cardWidth * 0.95 && isValidMove(game, from, candidate)) {
+      if (!bestTableau || dist < bestTableau.dist) {
+        bestTableau = { loc: candidate, dist };
+      }
+    }
+  }
+
+  return bestTableau ? bestTableau.loc : null;
+}
+
+export const GameBoard = memo(function GameBoard({
+  game,
+  theme,
+  activeHint,
+  elevatedIds,
+  onElevateIds,
+  onStockPress,
+  onSmartTap,
+  onDropMove,
+}: GameBoardProps) {
+  const [layout, setLayout] = useState<{ width: number; height: number } | null>(
+    null
+  );
+  const [animControllers] = useState(createAnimControllers);
+  const [draggingIds, setDraggingIds] = useState<string[]>([]);
+  const [hoverKey, setHoverKey] = useState<string | null>(null);
+
+  const metrics: BoardMetrics = useMemo(
+    () => computeBoardMetrics(layout?.width ?? 375, layout?.height ?? 520),
+    [layout]
+  );
+
+  const poses = useMemo(
+    () => computeAllCardPoses(game, game.drawMode, metrics),
+    [game, metrics]
+  );
+
+  const cardsById = useMemo(() => collectCardsRecord(game), [game]);
+
+  const latestRef = useRef({
+    game,
+    metrics,
+    poses,
+    onElevateIds,
+    onStockPress,
+    onSmartTap,
+    onDropMove,
+  });
+
+  useEffect(() => {
+    latestRef.current = {
+      game,
+      metrics,
+      poses,
+      onElevateIds,
+      onStockPress,
+      onSmartTap,
+      onDropMove,
+    };
+  });
+
+  const gestureRef = useRef<ActiveGesture | null>(null);
+  const hoverKeyRef = useRef<string | null>(null);
+  const prevLayoutKeyRef = useRef<string | null>(null);
+  const prevDealKeyRef = useRef<string | null>(null);
+
+  // Synchronize persistent card Animated.Values whenever poses or layout update
+  useLayoutEffect(() => {
+    if (!layout) return;
+
+    const layoutKey = `${layout.width}x${layout.height}`;
+    const dealKey = `${game.seed}:${game.drawMode}:${game.dealType}`;
+    const layoutChanged = prevLayoutKeyRef.current !== layoutKey;
+    const isFreshDeal =
+      prevDealKeyRef.current !== null &&
+      prevDealKeyRef.current !== dealKey &&
+      game.moves === 0;
+
+    prevLayoutKeyRef.current = layoutKey;
+    prevDealKeyRef.current = dealKey;
+
+    const stockX = metrics.colX(0);
+    const stockY = metrics.topPadding;
+
+    let staggerIdx = 0;
+
+    for (const baseCard of ORDERED_CARDS) {
+      const id = baseCard.id;
+      const ctrl = animControllers[id];
+      const pose = poses.get(id);
+      const card = cardsById[id];
+      if (!ctrl || !pose || !card) continue;
+
+      // Snap immediately on initial measurement or viewport resize
+      if (!ctrl.initialized || layoutChanged) {
+        ctrl.x.stopAnimation();
+        ctrl.y.stopAnimation();
+        ctrl.scale.stopAnimation();
+        ctrl.flipScaleX.stopAnimation();
+        ctrl.x.setValue(pose.x);
+        ctrl.y.setValue(pose.y);
+        ctrl.scale.setValue(1);
+        ctrl.flipScaleX.setValue(1);
+        ctrl.currentX = pose.x;
+        ctrl.currentY = pose.y;
+        ctrl.lastFaceUp = card.faceUp;
+        ctrl.initialized = true;
+        continue;
+      }
+
+      // Staggered deal cascade when starting a new deal inside GameScreen
+      if (isFreshDeal) {
+        ctrl.x.stopAnimation();
+        ctrl.y.stopAnimation();
+        ctrl.scale.setValue(1);
+        ctrl.flipScaleX.setValue(1);
+        ctrl.lastFaceUp = card.faceUp;
+
+        if (pose.zone === 'tableau') {
+          ctrl.x.setValue(stockX);
+          ctrl.y.setValue(stockY);
+          ctrl.currentX = pose.x;
+          ctrl.currentY = pose.y;
+          const delay = staggerIdx++ * 12;
+          Animated.parallel([
+            Animated.timing(ctrl.x, {
+              toValue: pose.x,
+              duration: 190,
+              delay,
+              easing: Easing.out(Easing.cubic),
+              useNativeDriver: USE_NATIVE_DRIVER,
+            }),
+            Animated.timing(ctrl.y, {
+              toValue: pose.y,
+              duration: 190,
+              delay,
+              easing: Easing.out(Easing.cubic),
+              useNativeDriver: USE_NATIVE_DRIVER,
+            }),
+          ]).start();
+        } else {
+          ctrl.x.setValue(pose.x);
+          ctrl.y.setValue(pose.y);
+          ctrl.currentX = pose.x;
+          ctrl.currentY = pose.y;
+        }
+        continue;
+      }
+
+      // Smoothly glide any card whose resting coordinate changed
+      const dist = Math.hypot(pose.x - ctrl.currentX, pose.y - ctrl.currentY);
+      if (dist > 0.5) {
+        ctrl.x.stopAnimation();
+        ctrl.y.stopAnimation();
+        ctrl.scale.stopAnimation();
+
+        ctrl.currentX = pose.x;
+        ctrl.currentY = pose.y;
+
+        const duration = Math.min(220, Math.max(145, Math.round(135 + dist * 0.22)));
+
+        Animated.parallel([
+          Animated.timing(ctrl.x, {
+            toValue: pose.x,
+            duration,
+            easing: Easing.out(Easing.cubic),
             useNativeDriver: USE_NATIVE_DRIVER,
           }),
-          Animated.spring(val, {
+          Animated.timing(ctrl.y, {
+            toValue: pose.y,
+            duration,
+            easing: Easing.out(Easing.cubic),
+            useNativeDriver: USE_NATIVE_DRIVER,
+          }),
+          Animated.timing(ctrl.scale, {
             toValue: 1,
-            damping: 12,
-            stiffness: 260,
-            mass: 0.6,
+            duration,
+            easing: Easing.out(Easing.cubic),
             useNativeDriver: USE_NATIVE_DRIVER,
           }),
         ]).start();
-      },
-      [foundationPulses]
-    );
+      } else {
+        ctrl.x.setValue(pose.x);
+        ctrl.y.setValue(pose.y);
+        ctrl.scale.setValue(1);
+        ctrl.currentX = pose.x;
+        ctrl.currentY = pose.y;
+      }
 
-    const spawnFlightsAndFlips = useCallback(
-      (
-        newFlights: {
-          item: FlightAnimItem;
-          delayMs: number;
-          durationMs: number;
-          useSpring?: boolean;
-          landingFoundationIdx?: number;
-        }[],
-        newFlips: { item: FlipAnimItem; delayMs: number }[]
-      ) => {
-        if (newFlights.length > 0) {
-          const movingCardIds = new Set(newFlights.map((f) => f.item.card.id));
-          setFlights((prev) => [
-            ...prev.filter((p) => !movingCardIds.has(p.card.id)),
-            ...newFlights.map((f) => f.item),
-          ]);
-
-          newFlights.forEach(
-            ({ item, delayMs, durationMs, useSpring, landingFoundationIdx }) => {
-              const anim = useSpring
-                ? Animated.sequence([
-                    ...(delayMs > 0 ? [Animated.delay(delayMs)] : []),
-                    Animated.spring(item.progress, {
-                      toValue: 1,
-                      damping: 22,
-                      stiffness: 290,
-                      mass: 0.72,
-                      useNativeDriver: USE_NATIVE_DRIVER,
-                    }),
-                  ])
-                : Animated.timing(item.progress, {
-                    toValue: 1,
-                    duration: durationMs,
-                    delay: delayMs,
-                    easing: Easing.out(Easing.cubic),
-                    useNativeDriver: USE_NATIVE_DRIVER,
-                  });
-
-              anim.start(() => {
-                if (landingFoundationIdx !== undefined) {
-                  pulseFoundation(landingFoundationIdx);
-                }
-                setFlights((curr) => curr.filter((x) => x.key !== item.key));
-              });
-            }
-          );
-        }
-
-        if (newFlips.length > 0) {
-          const flippingIds = new Set(newFlips.map((f) => f.item.card.id));
-          setFlips((prev) => [
-            ...prev.filter((p) => !flippingIds.has(p.card.id)),
-            ...newFlips.map((f) => f.item),
-          ]);
-
-          newFlips.forEach(({ item, delayMs }) => {
-            Animated.timing(item.progress, {
-              toValue: 1,
-              duration: 215,
-              delay: delayMs,
-              easing: Easing.inOut(Easing.cubic),
-              useNativeDriver: USE_NATIVE_DRIVER,
-            }).start(() => {
-              setFlips((curr) => curr.filter((x) => x.key !== item.key));
-            });
-          });
-        }
-      },
-      [pulseFoundation]
-    );
-
-    const animateTransition = useCallback(
-      (
-        prevGame: GameState,
-        nextGame: GameState,
-        customOrigins?: DragOriginMap
-      ) => {
-        const m = metricsRef.current;
-        const prevPoses = computeAllCardPoses(prevGame, prevGame.drawMode, m);
-        const nextPoses = computeAllCardPoses(nextGame, nextGame.drawMode, m);
-        const nextCards = collectCardsMap(nextGame);
-
-        const flightSpecs: {
-          item: FlightAnimItem;
-          delayMs: number;
-          durationMs: number;
-          useSpring?: boolean;
-          landingFoundationIdx?: number;
-        }[] = [];
-        const flipSpecs: { item: FlipAnimItem; delayMs: number }[] = [];
-
-        let stockToWasteCount = 0;
-        let recycleCount = 0;
-
-        nextPoses.forEach((nextPose, cardId) => {
-          const prevPose = prevPoses.get(cardId);
-          const card = nextCards.get(cardId);
-          if (!prevPose || !card) return;
-
-          const customOrigin = customOrigins?.[cardId];
-          const fromX = customOrigin ? customOrigin.x : prevPose.x;
-          const fromY = customOrigin ? customOrigin.y : prevPose.y;
-          const dist = Math.hypot(nextPose.x - fromX, nextPose.y - fromY);
-
-          if (dist > 2) {
-            // Skip animating hidden interior cards of a huge stock recycle beyond top 4
-            if (prevPose.zone === 'waste' && nextPose.zone === 'stock') {
-              recycleCount++;
-              if (recycleCount > 4) return;
-            }
-
-            const isStockDraw =
-              prevPose.zone === 'stock' && nextPose.zone === 'waste';
-            const staggerDelay = isStockDraw ? stockToWasteCount++ * 40 : 0;
-
-            const isDragSettle = Boolean(customOrigin);
-            const arcLift = isDragSettle
-              ? 0
-              : dist > 65
-              ? Math.min(20, Math.round(dist * 0.085))
-              : 0;
-            const peakScale = isDragSettle ? 1.03 : dist > 45 ? 1.065 : 1.01;
-            const durationMs = isDragSettle
-              ? 165
-              : Math.min(255, Math.max(175, Math.round(155 + dist * 0.25)));
-
-            const key = `flight-${++animCounterRef.current}-${cardId}`;
-            flightSpecs.push({
-              item: {
-                key,
-                card,
-                fromX,
-                fromY,
-                toX: nextPose.x,
-                toY: nextPose.y,
-                arcLift,
-                peakScale,
-                flipFromBack: !prevPose.faceUp && nextPose.faceUp,
-                flipToBack: prevPose.faceUp && !nextPose.faceUp,
-                zOrder: nextPose.zOrder + (nextPose.zone === 'foundation' ? 200 : 120),
-                progress: new Animated.Value(0),
-              },
-              delayMs: staggerDelay,
-              durationMs,
-              useSpring: isDragSettle,
-              landingFoundationIdx:
-                nextPose.zone === 'foundation' ? nextPose.pileIndex : undefined,
-            });
-          } else if (prevPose.faceUp !== nextPose.faceUp && nextPose.zone === 'tableau') {
-            // Stationary card flip on Tableau (e.g. newly uncovered card!)
-            const key = `flip-${++animCounterRef.current}-${cardId}`;
-            flipSpecs.push({
-              item: {
-                key,
-                card,
-                x: nextPose.x,
-                y: nextPose.y,
-                toFaceUp: nextPose.faceUp,
-                progress: new Animated.Value(0),
-              },
-              delayMs: 35,
-            });
-          }
-        });
-
-        spawnFlightsAndFlips(flightSpecs, flipSpecs);
-      },
-      [spawnFlightsAndFlips]
-    );
-
-    const animateFreshDeal = useCallback(
-      (nextGame: GameState, overrideMetrics?: BoardMetrics) => {
-        const m = overrideMetrics ?? metricsRef.current;
-        const nextPoses = computeAllCardPoses(nextGame, nextGame.drawMode, m);
-        const stockOriginX = m.colX(0);
-        const stockOriginY = m.topPadding;
-
-        const flightSpecs: {
-          item: FlightAnimItem;
-          delayMs: number;
-          durationMs: number;
-        }[] = [];
-
-        let dealOrder = 0;
-        for (let col = 0; col < 7; col++) {
-          const pile = nextGame.tableau[col];
-          for (let row = 0; row < pile.length; row++) {
-            const card = pile[row];
-            const pose = nextPoses.get(card.id);
-            if (!pose) continue;
-            const key = `deal-${++animCounterRef.current}-${card.id}`;
-            flightSpecs.push({
-              item: {
-                key,
-                card,
-                fromX: stockOriginX,
-                fromY: stockOriginY,
-                toX: pose.x,
-                toY: pose.y,
-                arcLift: 10,
-                peakScale: 1.03,
-                flipFromBack: card.faceUp,
-                flipToBack: false,
-                zOrder: 100 + row + col * 10,
-                progress: new Animated.Value(0),
-              },
-              delayMs: dealOrder * 14,
-              durationMs: 225,
-            });
-            dealOrder++;
-          }
-        }
-
-        setFlips([]);
-        setFlights(flightSpecs.map((f) => f.item));
-        flightSpecs.forEach(({ item, delayMs, durationMs }) => {
-          Animated.timing(item.progress, {
+      // Subtle card turn pulse when a stationary tableau card flips face-up
+      if (ctrl.lastFaceUp !== card.faceUp) {
+        ctrl.lastFaceUp = card.faceUp;
+        if (dist <= 0.5 && pose.zone === 'tableau') {
+          ctrl.flipScaleX.stopAnimation();
+          ctrl.flipScaleX.setValue(0.12);
+          Animated.spring(ctrl.flipScaleX, {
             toValue: 1,
-            duration: durationMs,
-            delay: delayMs,
-            easing: Easing.out(Easing.cubic),
+            damping: 16,
+            stiffness: 280,
+            mass: 0.6,
             useNativeDriver: USE_NATIVE_DRIVER,
-          }).start(() => {
-            setFlights((curr) => curr.filter((x) => x.key !== item.key));
-          });
-        });
-      },
-      []
-    );
-
-    useImperativeHandle(
-      ref,
-      () => ({
-        animateTransition,
-        animateFreshDeal: (nextGame: GameState) => animateFreshDeal(nextGame),
-      }),
-      [animateTransition, animateFreshDeal]
-    );
-
-    const computeDropTarget = useCallback(
-      (from: PileLocation, centerX: number, centerY: number): PileLocation | null => {
-        const m = metricsRef.current;
-        const current = gameRef.current;
-
-        if (centerY < m.tableauTop - m.sectionGap * 0.25) {
-          let bestFoundation: { loc: PileLocation; dist: number } | null = null;
-          for (let f = 0; f < 4; f++) {
-            const slotCenterX = m.colX(3 + f) + m.cardWidth / 2;
-            const slotCenterY = m.topPadding + m.cardHeight / 2;
-            const dist = Math.hypot(centerX - slotCenterX, centerY - slotCenterY);
-            const candidate: PileLocation = { zone: 'foundation', index: f };
-            if (dist < m.cardWidth * 1.15 && isValidMove(current, from, candidate)) {
-              if (!bestFoundation || dist < bestFoundation.dist) {
-                bestFoundation = { loc: candidate, dist };
-              }
-            }
-          }
-          if (bestFoundation) return bestFoundation.loc;
+          }).start();
         }
+      }
+    }
+  }, [animControllers, cardsById, game, layout, metrics, poses]);
 
-        let bestTableau: { loc: PileLocation; dist: number } | null = null;
-        for (let col = 0; col < 7; col++) {
-          const slotCenterX = m.colX(col) + m.cardWidth / 2;
-          const dist = Math.abs(centerX - slotCenterX);
-          const candidate: PileLocation = { zone: 'tableau', index: col };
-          if (dist < m.cardWidth * 0.95 && isValidMove(current, from, candidate)) {
-            if (!bestTableau || dist < bestTableau.dist) {
-              bestTableau = { loc: candidate, dist };
-            }
-          }
-        }
+  // Single persistent board-level PanResponder — never recreated across renders
+  const boardPanHandlers = useMemo(() => {
+    const responder = PanResponder.create({
+      onStartShouldSetPanResponder: () => true,
+      onMoveShouldSetPanResponder: (_, g) => Math.hypot(g.dx, g.dy) > 4,
+      onPanResponderGrant: (evt) => {
+        const { game: curGame, metrics: m, poses: curPoses } = latestRef.current;
+        const bx = evt.nativeEvent.locationX;
+        const by = evt.nativeEvent.locationY;
+        const hit = hitTestBoard(bx, by, curGame, m, curPoses);
 
-        return bestTableau ? bestTableau.loc : null;
-      },
-      []
-    );
-
-    const handleGestureStartCheck = useCallback(
-      (from: PileLocation) => {
-        dragPan.setValue({ x: 0, y: 0 });
-        const cards = getMovingCards(gameRef.current, from);
-        return Boolean(cards && cards.length > 0);
-      },
-      [dragPan]
-    );
-
-    const handleGestureMove = useCallback(
-      (
-        from: PileLocation,
-        originX: number,
-        originY: number,
-        cardOffsetY: number,
-        dx: number,
-        dy: number
-      ) => {
-        const dist = Math.hypot(dx, dy);
-        if (!dragSessionRef.current && dist >= 6) {
-          const cards = getMovingCards(gameRef.current, from);
-          if (!cards || cards.length === 0) return;
-          const session: DragSession = {
-            from,
-            cards,
-            originX,
-            originY,
-            cardOffsetY,
-          };
-          dragSessionRef.current = session;
-          setDragSession(session);
-        }
-
-        if (dragSessionRef.current) {
-          dragPan.setValue({ x: dx, y: dy });
-          const m = metricsRef.current;
-          const centerX = originX + dx + m.cardWidth / 2;
-          const centerY = originY + dy + m.cardHeight / 2;
-          setHoverTarget(computeDropTarget(from, centerX, centerY));
-        }
-      },
-      [computeDropTarget, dragPan]
-    );
-
-    const handleGestureRelease = useCallback(
-      (from: PileLocation, dx: number, dy: number) => {
-        const active = dragSessionRef.current;
-        const dist = Math.hypot(dx, dy);
-
-        dragSessionRef.current = null;
-        setDragSession(null);
-        setHoverTarget(null);
-        dragPan.setValue({ x: 0, y: 0 });
-
-        if (!active || dist < 7) {
-          onSmartTap(from);
+        if (!hit) {
+          gestureRef.current = null;
           return;
         }
 
-        const m = metricsRef.current;
-        const centerX = active.originX + dx + m.cardWidth / 2;
-        const centerY = active.originY + dy + m.cardHeight / 2;
-        const target = computeDropTarget(active.from, centerX, centerY);
+        if (hit.type === 'stock') {
+          gestureRef.current = { hit, dragging: false, basePositions: [] };
+          return;
+        }
 
-        const releaseOrigins: DragOriginMap = {};
-        active.cards.forEach((c, idx) => {
-          releaseOrigins[c.id] = {
-            x: active.originX + dx,
-            y: active.originY + dy + idx * active.cardOffsetY,
-          };
+        const basePositions = hit.cards.map((c) => {
+          const p = curPoses.get(c.id);
+          return { id: c.id, x: p?.x ?? 0, y: p?.y ?? 0 };
         });
 
-        if (target) {
-          onDropMove(active.from, target, releaseOrigins);
-        } else {
-          // Smooth spring snap-back to original resting coordinates
-          const snapSpecs = active.cards.map((c, idx) => {
-            const key = `snap-${++animCounterRef.current}-${c.id}`;
-            return {
-              item: {
-                key,
-                card: c,
-                fromX: active.originX + dx,
-                fromY: active.originY + dy + idx * active.cardOffsetY,
-                toX: active.originX,
-                toY: active.originY + idx * active.cardOffsetY,
-                arcLift: 0,
-                peakScale: 1.02,
-                flipFromBack: false,
-                flipToBack: false,
-                zOrder: 300 + idx,
-                progress: new Animated.Value(0),
-              },
-              delayMs: 0,
-              durationMs: 195,
-              useSpring: true,
-            };
-          });
-          spawnFlightsAndFlips(snapSpecs, []);
+        gestureRef.current = {
+          hit,
+          dragging: false,
+          basePositions,
+        };
+      },
+      onPanResponderMove: (_, g) => {
+        const active = gestureRef.current;
+        if (!active || active.hit?.type !== 'card') return;
+
+        const dist = Math.hypot(g.dx, g.dy);
+        if (!active.dragging && dist >= 6) {
+          active.dragging = true;
+          const ids = active.basePositions.map((b) => b.id);
+          for (const b of active.basePositions) {
+            const ctrl = animControllers[b.id];
+            if (ctrl) {
+              ctrl.x.stopAnimation();
+              ctrl.y.stopAnimation();
+              ctrl.scale.stopAnimation();
+              ctrl.scale.setValue(1.04);
+            }
+          }
+          setDraggingIds(ids);
+        }
+
+        if (active.dragging) {
+          for (const b of active.basePositions) {
+            const ctrl = animControllers[b.id];
+            if (ctrl) {
+              const nx = b.x + g.dx;
+              const ny = b.y + g.dy;
+              ctrl.x.setValue(nx);
+              ctrl.y.setValue(ny);
+              ctrl.currentX = nx;
+              ctrl.currentY = ny;
+            }
+          }
+
+          const { game: curGame, metrics: m } = latestRef.current;
+          const lead = active.basePositions[0];
+          const target = computeDropTarget(
+            curGame,
+            m,
+            active.hit.from,
+            lead.x + g.dx + m.cardWidth / 2,
+            lead.y + g.dy + m.cardHeight / 2
+          );
+          const nextHoverKey = target ? `${target.zone}:${target.index}` : null;
+          if (hoverKeyRef.current !== nextHoverKey) {
+            hoverKeyRef.current = nextHoverKey;
+            setHoverKey(nextHoverKey);
+          }
         }
       },
-      [computeDropTarget, dragPan, onDropMove, onSmartTap, spawnFlightsAndFlips]
-    );
+      onPanResponderRelease: (_, g) => {
+        const active = gestureRef.current;
+        gestureRef.current = null;
 
-    const handleGestureTerminate = useCallback(() => {
-      dragSessionRef.current = null;
-      setDragSession(null);
-      setHoverTarget(null);
-      dragPan.setValue({ x: 0, y: 0 });
-    }, [dragPan]);
-
-    const handleLayout = (e: LayoutChangeEvent) => {
-      const { width, height } = e.nativeEvent.layout;
-      if (width > 0 && height > 0) {
-        setLayout({ width, height });
-        const dealKey = `${game.seed}:${game.drawMode}:${game.dealType}`;
-        if (
-          game.moves === 0 &&
-          game.elapsedSeconds === 0 &&
-          lastDealtKeyRef.current !== dealKey
-        ) {
-          lastDealtKeyRef.current = dealKey;
-          const freshMetrics = computeBoardMetrics(width, height);
-          animateFreshDeal(game, freshMetrics);
+        if (hoverKeyRef.current !== null) {
+          hoverKeyRef.current = null;
+          setHoverKey(null);
         }
+
+        if (!active || !active.hit) return;
+
+        const dist = Math.hypot(g.dx, g.dy);
+        const {
+          game: curGame,
+          metrics: m,
+          onElevateIds: elevate,
+          onStockPress: triggerStock,
+          onSmartTap: triggerTap,
+          onDropMove: triggerDrop,
+        } = latestRef.current;
+
+        // Tap (< 7px movement)
+        if (!active.dragging || dist < 7) {
+          setDraggingIds([]);
+          if (active.hit.type === 'stock') {
+            triggerStock();
+          } else {
+            triggerTap(active.hit.from);
+          }
+          return;
+        }
+
+        setDraggingIds([]);
+        if (active.hit.type !== 'card') return;
+
+        const lead = active.basePositions[0];
+        const target = computeDropTarget(
+          curGame,
+          m,
+          active.hit.from,
+          lead.x + g.dx + m.cardWidth / 2,
+          lead.y + g.dy + m.cardHeight / 2
+        );
+
+        const movedIds = active.basePositions.map((b) => b.id);
+        elevate(movedIds);
+
+        if (target) {
+          triggerDrop(active.hit.from, target);
+        } else {
+          // Smooth spring snap-back to original slot
+          for (const b of active.basePositions) {
+            const ctrl = animControllers[b.id];
+            if (!ctrl) continue;
+            ctrl.currentX = b.x;
+            ctrl.currentY = b.y;
+            Animated.parallel([
+              Animated.timing(ctrl.x, {
+                toValue: b.x,
+                duration: 175,
+                easing: Easing.out(Easing.cubic),
+                useNativeDriver: USE_NATIVE_DRIVER,
+              }),
+              Animated.timing(ctrl.y, {
+                toValue: b.y,
+                duration: 175,
+                easing: Easing.out(Easing.cubic),
+                useNativeDriver: USE_NATIVE_DRIVER,
+              }),
+              Animated.timing(ctrl.scale, {
+                toValue: 1,
+                duration: 175,
+                useNativeDriver: USE_NATIVE_DRIVER,
+              }),
+            ]).start();
+          }
+        }
+      },
+      onPanResponderTerminate: () => {
+        const active = gestureRef.current;
+        gestureRef.current = null;
+        hoverKeyRef.current = null;
+        setHoverKey(null);
+        setDraggingIds([]);
+
+        if (active?.dragging) {
+          for (const b of active.basePositions) {
+            const ctrl = animControllers[b.id];
+            if (!ctrl) continue;
+            ctrl.currentX = b.x;
+            ctrl.currentY = b.y;
+            ctrl.x.setValue(b.x);
+            ctrl.y.setValue(b.y);
+            ctrl.scale.setValue(1);
+          }
+        }
+      },
+    });
+    return responder.panHandlers;
+  }, [animControllers]);
+
+  const handleLayout = (e: LayoutChangeEvent) => {
+    const { width, height } = e.nativeEvent.layout;
+    if (width > 0 && height > 0) {
+      setLayout((prev) =>
+        prev && prev.width === width && prev.height === height
+          ? prev
+          : { width, height }
+      );
+    }
+  };
+
+  const draggingSet = useMemo(() => new Set(draggingIds), [draggingIds]);
+
+  const hintedCardIds = useMemo(() => {
+    const set = new Set<string>();
+    if (!activeHint) return set;
+    const f = activeHint.from;
+    if (f.zone === 'stock' && game.stock.length > 0) {
+      set.add(game.stock[game.stock.length - 1].id);
+    } else if (f.zone === 'waste' && game.waste.length > 0) {
+      set.add(game.waste[game.waste.length - 1].id);
+    } else if (f.zone === 'tableau' && f.index !== undefined) {
+      const pile = game.tableau[f.index];
+      const start = f.cardIndex ?? pile.length - 1;
+      for (let i = start; i < pile.length; i++) {
+        if (pile[i]) set.add(pile[i].id);
       }
-    };
+    }
+    return set;
+  }, [activeHint, game]);
 
-    const hiddenAnimatedIds = useMemo(() => {
-      const set = new Set<string>();
-      dragSession?.cards.forEach((c) => set.add(c.id));
-      flights.forEach((f) => set.add(f.card.id));
-      flips.forEach((fl) => set.add(fl.card.id));
-      return set;
-    }, [dragSession, flights, flips]);
+  const isDestHighlighted = (zone: 'foundation' | 'tableau', index: number) => {
+    if (hoverKey === `${zone}:${index}`) return true;
+    return activeHint?.to?.zone === zone && activeHint?.to?.index === index;
+  };
 
-    const isHintSource = (
-      zone: PileLocation['zone'],
-      index?: number,
-      cardIndex?: number
-    ) => {
-      if (!activeHint) return false;
-      if (activeHint.from.zone !== zone) return false;
-      if (index !== undefined && activeHint.from.index !== index) return false;
-      if (cardIndex !== undefined && activeHint.from.cardIndex !== undefined) {
-        return cardIndex >= activeHint.from.cardIndex;
-      }
-      return true;
-    };
+  const stockHinted = activeHint?.from.zone === 'stock';
 
-    const isHintDest = (zone: PileLocation['zone'], index: number) => {
-      if (!activeHint?.to) return false;
-      return activeHint.to.zone === zone && activeHint.to.index === index;
-    };
-
-    const isHoveredDest = (zone: PileLocation['zone'], index: number) => {
-      if (!hoverTarget) return false;
-      return hoverTarget.zone === zone && hoverTarget.index === index;
-    };
-
-    // Waste fan: in Draw 1, keep under-card visible while newly drawn top card is in flight!
-    const visibleWasteCount =
-      game.drawMode === 3
-        ? Math.min(3, game.waste.length)
-        : Math.min(1, game.waste.length);
-    const visibleWaste = game.waste.slice(game.waste.length - visibleWasteCount);
-    const draw1UnderWaste =
-      game.drawMode === 1 &&
-      game.waste.length >= 2 &&
-      hiddenAnimatedIds.has(game.waste[game.waste.length - 1].id)
-        ? game.waste[game.waste.length - 2]
-        : null;
-
-    const sortedFlights = useMemo(
-      () => [...flights].sort((a, b) => a.zOrder - b.zOrder),
-      [flights]
-    );
-
-    return (
-      <View style={styles.outerWrapper} onLayout={handleLayout}>
-        <View style={[styles.boardInner, { width: metrics.boardWidth }]}>
-          {/* TOP ROW: Stock (col 0), Waste (cols 1-2), Foundations (cols 3-6) */}
-          <View
-            style={{
-              height: metrics.cardHeight,
-              marginTop: metrics.topPadding,
-              position: 'relative',
-            }}
-          >
-            {/* Stock Slot (col 0) */}
-            <Pressable
-              onPress={onStockPress}
+  return (
+    <View style={styles.outerWrapper} onLayout={handleLayout}>
+      {layout && (
+        <View
+          {...boardPanHandlers}
+          style={[styles.boardInner, { width: metrics.boardWidth }]}
+        >
+          {/* STATIC EMPTY SLOTS LAYER */}
+          <View pointerEvents="none" style={StyleSheet.absoluteFill}>
+            {/* Stock Empty / Recycle Base Slot */}
+            <View
               style={[
                 styles.slotBase,
                 {
                   left: metrics.colX(0),
+                  top: metrics.topPadding,
                   width: metrics.cardWidth,
                   height: metrics.cardHeight,
                   borderRadius: metrics.slotRadius,
                   backgroundColor: theme.slotBg,
-                  borderColor: isHintSource('stock')
-                    ? theme.hintGlow
-                    : theme.slotBorder,
-                  borderWidth: isHintSource('stock') ? 2 : 1.2,
+                  borderColor: stockHinted ? theme.hintGlow : theme.slotBorder,
+                  borderWidth: stockHinted ? 2 : 1.2,
                 },
               ]}
-              accessibilityRole="button"
-              accessibilityLabel={
-                game.stock.length > 0
-                  ? `Draw from stock, ${game.stock.length} cards remaining`
-                  : 'Recycle waste pile into stock'
-              }
             >
-              {game.stock.length > 0 ? (
-                <View style={{ position: 'relative' }}>
-                  <PlayingCard
-                    card={game.stock[game.stock.length - 1]}
-                    width={metrics.cardWidth}
-                    height={metrics.cardHeight}
-                    theme={theme}
-                    highlighted={isHintSource('stock')}
-                  />
-                  <View
-                    style={[
-                      styles.stockCountBadge,
-                      { backgroundColor: 'rgba(0,0,0,0.62)' },
-                    ]}
-                  >
-                    <Text style={styles.stockCountText}>{game.stock.length}</Text>
-                  </View>
-                </View>
-              ) : (
-                <View style={styles.recycleIconBox}>
-                  <Text style={[styles.recycleGlyph, { color: theme.textSecondary }]}>
-                    ↻
-                  </Text>
-                </View>
-              )}
-            </Pressable>
-
-            {/* Waste Pile (starts at col 1) */}
-            <View
-              style={{
-                position: 'absolute',
-                left: metrics.colX(1),
-                top: 0,
-                height: metrics.cardHeight,
-                width: metrics.cardWidth + metrics.wasteFanStep * 2,
-              }}
-            >
-              {visibleWaste.length === 0 ? (
-                <View
-                  style={[
-                    styles.slotBase,
-                    {
-                      width: metrics.cardWidth,
-                      height: metrics.cardHeight,
-                      borderRadius: metrics.slotRadius,
-                      backgroundColor: theme.slotBg,
-                      borderColor: theme.slotBorder,
-                      opacity: 0.45,
-                    },
-                  ]}
-                />
-              ) : (
-                <>
-                  {draw1UnderWaste && !hiddenAnimatedIds.has(draw1UnderWaste.id) && (
-                    <View
-                      style={{ position: 'absolute', left: 0, top: 0 }}
-                      pointerEvents="none"
-                    >
-                      <PlayingCard
-                        card={draw1UnderWaste}
-                        width={metrics.cardWidth}
-                        height={metrics.cardHeight}
-                        theme={theme}
-                      />
-                    </View>
-                  )}
-                  {visibleWaste.map((card, i) => {
-                    const isTopWaste = i === visibleWaste.length - 1;
-                    const xOffset = i * metrics.wasteFanStep;
-                    const hidden = hiddenAnimatedIds.has(card.id);
-
-                    if (!isTopWaste) {
-                      return (
-                        <View
-                          key={card.id}
-                          style={{
-                            position: 'absolute',
-                            left: xOffset,
-                            top: 0,
-                            opacity: hidden ? 0 : 1,
-                          }}
-                          pointerEvents="none"
-                        >
-                          <PlayingCard
-                            card={card}
-                            width={metrics.cardWidth}
-                            height={metrics.cardHeight}
-                            theme={theme}
-                          />
-                        </View>
-                      );
-                    }
-
-                    return (
-                      <InteractiveCardSlot
-                        key={card.id}
-                        from={{ zone: 'waste' }}
-                        originX={metrics.colX(1) + xOffset}
-                        originY={metrics.topPadding}
-                        onGestureStartCheck={handleGestureStartCheck}
-                        onGestureMove={handleGestureMove}
-                        onGestureRelease={handleGestureRelease}
-                        onGestureTerminate={handleGestureTerminate}
-                        style={{
-                          position: 'absolute',
-                          left: xOffset,
-                          top: 0,
-                          opacity: hidden ? 0 : 1,
-                        }}
-                      >
-                        <PlayingCard
-                          card={card}
-                          width={metrics.cardWidth}
-                          height={metrics.cardHeight}
-                          theme={theme}
-                          highlighted={isHintSource('waste')}
-                        />
-                      </InteractiveCardSlot>
-                    );
-                  })}
-                </>
-              )}
+              <Text style={[styles.recycleGlyph, { color: theme.textSecondary }]}>
+                ↻
+              </Text>
             </View>
 
-            {/* 4 Foundation Slots (cols 3..6) */}
-            {game.foundations.map((pile, fIdx) => {
-              const left = metrics.colX(3 + fIdx);
-              const topCard = pile.length > 0 ? pile[pile.length - 1] : null;
-              const underCard = pile.length > 1 ? pile[pile.length - 2] : null;
-              const highlightedSlot =
-                isHoveredDest('foundation', fIdx) || isHintDest('foundation', fIdx);
-
-              const topHidden = topCard ? hiddenAnimatedIds.has(topCard.id) : false;
-              const displayCard = topHidden
-                ? underCard && !hiddenAnimatedIds.has(underCard.id)
-                  ? underCard
-                  : null
-                : topCard;
-
-              const slotStyle: StyleProp<ViewStyle> = [
+            {/* Waste Empty Base Slot */}
+            <View
+              style={[
                 styles.slotBase,
                 {
-                  left,
+                  left: metrics.colX(1),
+                  top: metrics.topPadding,
                   width: metrics.cardWidth,
                   height: metrics.cardHeight,
                   borderRadius: metrics.slotRadius,
-                  backgroundColor: highlightedSlot
-                    ? theme.accentSoft
-                    : theme.slotBg,
-                  borderColor: highlightedSlot ? theme.hintGlow : theme.slotBorder,
-                  borderWidth: highlightedSlot ? 2 : 1.2,
+                  backgroundColor: theme.slotBg,
+                  borderColor: theme.slotBorder,
+                  opacity: 0.45,
                 },
-              ];
+              ]}
+            />
 
-              const inner = (
-                <Animated.View
-                  style={{
-                    width: '100%',
-                    height: '100%',
-                    alignItems: 'center',
-                    justifyContent: 'center',
-                    transform: [{ scale: foundationPulses[fIdx] }],
-                  }}
-                >
-                  {displayCard ? (
-                    <PlayingCard
-                      card={displayCard}
-                      width={metrics.cardWidth}
-                      height={metrics.cardHeight}
-                      theme={theme}
-                      highlighted={highlightedSlot}
-                    />
-                  ) : (
-                    <Text
-                      style={[
-                        styles.foundationWatermark,
-                        {
-                          color: theme.slotBorder,
-                          fontSize: Math.round(metrics.cardWidth * 0.42),
-                        },
-                      ]}
-                    >
-                      {FOUNDATION_WATERMARKS[fIdx]}
-                    </Text>
-                  )}
-                </Animated.View>
-              );
-
-              if (!topCard) {
-                return (
-                  <View key={`foundation-${fIdx}`} style={slotStyle}>
-                    {inner}
-                  </View>
-                );
-              }
-
-              return (
-                <InteractiveCardSlot
-                  key={`foundation-${fIdx}`}
-                  from={{ zone: 'foundation', index: fIdx }}
-                  originX={left}
-                  originY={metrics.topPadding}
-                  onGestureStartCheck={handleGestureStartCheck}
-                  onGestureMove={handleGestureMove}
-                  onGestureRelease={handleGestureRelease}
-                  onGestureTerminate={handleGestureTerminate}
-                  style={slotStyle}
-                >
-                  {inner}
-                </InteractiveCardSlot>
-              );
-            })}
-          </View>
-
-          {/* TABLEAU: 7 Columns */}
-          <View
-            style={{
-              marginTop: metrics.sectionGap,
-              flex: 1,
-              position: 'relative',
-            }}
-          >
-            {game.tableau.map((pile, colIdx) => {
-              const left = metrics.colX(colIdx);
-              const offsets = computeColumnOffsets(pile, metrics);
-              const highlightedCol =
-                isHoveredDest('tableau', colIdx) || isHintDest('tableau', colIdx);
-              const stepUpOffset =
-                pile.length > 1
-                  ? Math.max(
-                      16,
-                      offsets[offsets.length - 1] - offsets[offsets.length - 2]
-                    )
-                  : 22;
-
+            {/* 4 Foundation Base Slots */}
+            {[0, 1, 2, 3].map((fIdx) => {
+              const highlighted = isDestHighlighted('foundation', fIdx);
               return (
                 <View
-                  key={`col-${colIdx}`}
-                  style={{
-                    position: 'absolute',
-                    left,
-                    top: 0,
-                    width: metrics.cardWidth,
-                    bottom: 0,
-                  }}
+                  key={`f-slot-${fIdx}`}
+                  style={[
+                    styles.slotBase,
+                    {
+                      left: metrics.colX(3 + fIdx),
+                      top: metrics.topPadding,
+                      width: metrics.cardWidth,
+                      height: metrics.cardHeight,
+                      borderRadius: metrics.slotRadius,
+                      backgroundColor: highlighted
+                        ? theme.accentSoft
+                        : theme.slotBg,
+                      borderColor: highlighted
+                        ? theme.hintGlow
+                        : theme.slotBorder,
+                      borderWidth: highlighted ? 2 : 1.2,
+                    },
+                  ]}
                 >
-                  <View
+                  <Text
                     style={[
-                      styles.slotBase,
+                      styles.foundationWatermark,
                       {
-                        width: metrics.cardWidth,
-                        height: metrics.cardHeight,
-                        borderRadius: metrics.slotRadius,
-                        backgroundColor: highlightedCol
-                          ? theme.accentSoft
-                          : theme.slotBg,
-                        borderColor: highlightedCol
-                          ? theme.hintGlow
-                          : theme.slotBorder,
-                        borderWidth: highlightedCol ? 2 : 1.2,
+                        color: theme.slotBorder,
+                        fontSize: Math.round(metrics.cardWidth * 0.42),
                       },
                     ]}
                   >
-                    <Text
-                      style={[
-                        styles.kingWatermark,
-                        {
-                          color: theme.slotBorder,
-                          fontSize: Math.round(metrics.cardWidth * 0.34),
-                        },
-                      ]}
-                    >
-                      K
-                    </Text>
-                  </View>
+                    {FOUNDATION_WATERMARKS[fIdx]}
+                  </Text>
+                </View>
+              );
+            })}
 
-                  {pile.map((card, cIdx) => {
-                    const isHidden = hiddenAnimatedIds.has(card.id);
-                    const yOffset = offsets[cIdx] ?? 0;
-                    const cardOriginY = metrics.tableauTop + yOffset;
-                    const isTopOfCol = cIdx === pile.length - 1;
-                    const cardHighlighted =
-                      isHintSource('tableau', colIdx, cIdx) ||
-                      (isTopOfCol && highlightedCol);
-
-                    if (!card.faceUp) {
-                      return (
-                        <View
-                          key={card.id}
-                          style={{
-                            position: 'absolute',
-                            left: 0,
-                            top: yOffset,
-                            opacity: isHidden ? 0 : 1,
-                          }}
-                          pointerEvents="none"
-                        >
-                          <PlayingCard
-                            card={card}
-                            width={metrics.cardWidth}
-                            height={metrics.cardHeight}
-                            theme={theme}
-                          />
-                        </View>
-                      );
-                    }
-
-                    return (
-                      <InteractiveCardSlot
-                        key={card.id}
-                        from={{ zone: 'tableau', index: colIdx, cardIndex: cIdx }}
-                        originX={left}
-                        originY={cardOriginY}
-                        cardOffsetY={stepUpOffset}
-                        onGestureStartCheck={handleGestureStartCheck}
-                        onGestureMove={handleGestureMove}
-                        onGestureRelease={handleGestureRelease}
-                        onGestureTerminate={handleGestureTerminate}
-                        style={{
-                          position: 'absolute',
-                          left: 0,
-                          top: yOffset,
-                          opacity: isHidden ? 0 : 1,
-                        }}
-                      >
-                        <PlayingCard
-                          card={card}
-                          width={metrics.cardWidth}
-                          height={metrics.cardHeight}
-                          theme={theme}
-                          highlighted={cardHighlighted}
-                        />
-                      </InteractiveCardSlot>
-                    );
-                  })}
+            {/* 7 Tableau Empty Column Base Slots */}
+            {[0, 1, 2, 3, 4, 5, 6].map((colIdx) => {
+              const highlighted = isDestHighlighted('tableau', colIdx);
+              return (
+                <View
+                  key={`t-slot-${colIdx}`}
+                  style={[
+                    styles.slotBase,
+                    {
+                      left: metrics.colX(colIdx),
+                      top: metrics.tableauTop,
+                      width: metrics.cardWidth,
+                      height: metrics.cardHeight,
+                      borderRadius: metrics.slotRadius,
+                      backgroundColor: highlighted
+                        ? theme.accentSoft
+                        : theme.slotBg,
+                      borderColor: highlighted
+                        ? theme.hintGlow
+                        : theme.slotBorder,
+                      borderWidth: highlighted ? 2 : 1.2,
+                    },
+                  ]}
+                >
+                  <Text
+                    style={[
+                      styles.kingWatermark,
+                      {
+                        color: theme.slotBorder,
+                        fontSize: Math.round(metrics.cardWidth * 0.34),
+                      },
+                    ]}
+                  >
+                    K
+                  </Text>
                 </View>
               );
             })}
           </View>
 
-          {/* STATIONARY 3D CARD FLIP OVERLAY (Newly Revealed Tableau Cards) */}
-          {flips.map((flip) => {
-            const scaleX = flip.progress.interpolate({
-              inputRange: [0, 0.5, 1],
-              outputRange: [1, 0.04, 1],
-            });
-            const scaleY = flip.progress.interpolate({
-              inputRange: [0, 0.5, 1],
-              outputRange: [1, 1.06, 1],
-            });
-            const firstHalfOpacity = flip.progress.interpolate({
-              inputRange: [0, 0.49, 0.5, 1],
-              outputRange: [1, 1, 0, 0],
-            });
-            const secondHalfOpacity = flip.progress.interpolate({
-              inputRange: [0, 0.49, 0.5, 1],
-              outputRange: [0, 0, 1, 1],
-            });
+          {/* 52 PERSISTENT ANIMATED PLAYING CARDS (Never cloned or unmounted) */}
+          {ORDERED_CARDS.map((base) => {
+            const card = cardsById[base.id];
+            const pose = poses.get(base.id);
+            const ctrl = animControllers[base.id];
+            if (!card || !pose || !ctrl) return null;
 
-            const startFaceUp = !flip.toFaceUp;
+            // Hide buried cards in Stock or Foundation (>2 deep) so shadows don't stack dark
+            let buried = false;
+            if (pose.zone === 'stock') {
+              buried = pose.zOrder < game.stock.length - 2;
+            } else if (pose.zone === 'foundation') {
+              const fPile = game.foundations[pose.pileIndex];
+              buried = pose.zOrder - 40 < fPile.length - 2;
+            } else if (pose.zone === 'waste') {
+              const visCount = game.drawMode === 3 ? 3 : 2;
+              buried = pose.zOrder - 10 < game.waste.length - visCount;
+            }
+
+            const isDragging = draggingSet.has(card.id);
+            const isElevated = elevatedIds.has(card.id);
+            const zIndex = isDragging
+              ? 1000 + pose.zOrder
+              : isElevated
+              ? 500 + pose.zOrder
+              : pose.zOrder;
 
             return (
               <Animated.View
-                key={flip.key}
+                key={card.id}
                 pointerEvents="none"
-                style={[
-                  styles.animLayerItem,
-                  {
-                    left: flip.x,
-                    top: flip.y,
-                    width: metrics.cardWidth,
-                    height: metrics.cardHeight,
-                    transform: [{ scaleX }, { scaleY }],
-                  },
-                ]}
+                style={{
+                  position: 'absolute',
+                  left: 0,
+                  top: 0,
+                  width: metrics.cardWidth,
+                  height: metrics.cardHeight,
+                  zIndex,
+                  opacity: buried && !isElevated ? 0 : 1,
+                  transform: [
+                    { translateX: ctrl.x },
+                    { translateY: ctrl.y },
+                    { scale: ctrl.scale },
+                    { scaleX: ctrl.flipScaleX },
+                  ],
+                }}
               >
-                <Animated.View
-                  style={[StyleSheet.absoluteFill, { opacity: firstHalfOpacity }]}
-                >
-                  <PlayingCard
-                    card={{ ...flip.card, faceUp: startFaceUp }}
-                    width={metrics.cardWidth}
-                    height={metrics.cardHeight}
-                    theme={theme}
-                  />
-                </Animated.View>
-                <Animated.View
-                  style={[StyleSheet.absoluteFill, { opacity: secondHalfOpacity }]}
-                >
-                  <PlayingCard
-                    card={{ ...flip.card, faceUp: flip.toFaceUp }}
-                    width={metrics.cardWidth}
-                    height={metrics.cardHeight}
-                    theme={theme}
-                  />
-                </Animated.View>
+                <PlayingCard
+                  card={card}
+                  width={metrics.cardWidth}
+                  height={metrics.cardHeight}
+                  theme={theme}
+                  highlighted={hintedCardIds.has(card.id)}
+                  selected={isDragging}
+                />
               </Animated.View>
             );
           })}
 
-          {/* CONCURRENT IN-FLIGHT CARDS OVERLAY (Tap, Draw, Undo, Auto-Complete, Snap) */}
-          {sortedFlights.map((flight) => {
-            const translateX = flight.progress.interpolate({
-              inputRange: [0, 1],
-              outputRange: [flight.fromX, flight.toX],
-            });
-            const midY = (flight.fromY + flight.toY) * 0.5 - flight.arcLift;
-            const translateY = flight.progress.interpolate({
-              inputRange: [0, 0.48, 1],
-              outputRange: [flight.fromY, midY, flight.toY],
-            });
-            const scale = flight.progress.interpolate({
-              inputRange: [0, 0.48, 1],
-              outputRange: [1, flight.peakScale, 1],
-            });
-
-            const isMidAirFlip = flight.flipFromBack || flight.flipToBack;
-            const scaleX = isMidAirFlip
-              ? flight.progress.interpolate({
-                  inputRange: [0, 0.46, 1],
-                  outputRange: [1, 0.05, 1],
-                })
-              : 1;
-
-            const backOpacity = flight.flipFromBack
-              ? flight.progress.interpolate({
-                  inputRange: [0, 0.45, 0.47, 1],
-                  outputRange: [1, 1, 0, 0],
-                })
-              : flight.progress.interpolate({
-                  inputRange: [0, 0.45, 0.47, 1],
-                  outputRange: [0, 0, 1, 1],
-                });
-
-            const faceOpacity = flight.flipFromBack
-              ? flight.progress.interpolate({
-                  inputRange: [0, 0.45, 0.47, 1],
-                  outputRange: [0, 0, 1, 1],
-                })
-              : flight.progress.interpolate({
-                  inputRange: [0, 0.45, 0.47, 1],
-                  outputRange: [1, 1, 0, 0],
-                });
-
-            return (
-              <Animated.View
-                key={flight.key}
-                pointerEvents="none"
-                style={[
-                  styles.animLayerItem,
-                  {
-                    left: 0,
-                    top: 0,
-                    width: metrics.cardWidth,
-                    height: metrics.cardHeight,
-                    transform: [
-                      { translateX },
-                      { translateY },
-                      { scale },
-                      ...(typeof scaleX === 'number' ? [] : [{ scaleX }]),
-                    ],
-                  },
-                ]}
-              >
-                {isMidAirFlip ? (
-                  <>
-                    <Animated.View
-                      style={[StyleSheet.absoluteFill, { opacity: backOpacity }]}
-                    >
-                      <PlayingCard
-                        card={{ ...flight.card, faceUp: false }}
-                        width={metrics.cardWidth}
-                        height={metrics.cardHeight}
-                        theme={theme}
-                      />
-                    </Animated.View>
-                    <Animated.View
-                      style={[StyleSheet.absoluteFill, { opacity: faceOpacity }]}
-                    >
-                      <PlayingCard
-                        card={{ ...flight.card, faceUp: true }}
-                        width={metrics.cardWidth}
-                        height={metrics.cardHeight}
-                        theme={theme}
-                      />
-                    </Animated.View>
-                  </>
-                ) : (
-                  <PlayingCard
-                    card={flight.card}
-                    width={metrics.cardWidth}
-                    height={metrics.cardHeight}
-                    theme={theme}
-                  />
-                )}
-              </Animated.View>
-            );
-          })}
-
-          {/* ACTIVE FINGER DRAG OVERLAY */}
-          {dragSession && (
-            <Animated.View
+          {/* Stock Remaining Count Pill */}
+          {game.stock.length > 0 && (
+            <View
               pointerEvents="none"
               style={[
-                styles.floatingDragLayer,
+                styles.stockCountBadge,
                 {
-                  left: dragSession.originX,
-                  top: dragSession.originY,
-                  transform: [
-                    { translateX: dragPan.x },
-                    { translateY: dragPan.y },
-                    { scale: 1.045 },
-                  ],
+                  left: metrics.colX(0) + metrics.cardWidth - 24,
+                  top: metrics.topPadding + metrics.cardHeight - 19,
                 },
               ]}
             >
-              {dragSession.cards.map((card, idx) => (
-                <View
-                  key={`drag-${card.id}`}
-                  style={{
-                    position: 'absolute',
-                    left: 0,
-                    top: idx * dragSession.cardOffsetY,
-                  }}
-                >
-                  <PlayingCard
-                    card={card}
-                    width={metrics.cardWidth}
-                    height={metrics.cardHeight}
-                    theme={theme}
-                    selected
-                  />
-                </View>
-              ))}
-            </Animated.View>
+              <Text style={styles.stockCountText}>{game.stock.length}</Text>
+            </View>
           )}
         </View>
-      </View>
-    );
-  }
-);
+      )}
+    </View>
+  );
+});
 
 const styles = StyleSheet.create({
   outerWrapper: {
@@ -1280,18 +847,18 @@ const styles = StyleSheet.create({
   boardInner: {
     flex: 1,
     position: 'relative',
+    userSelect: 'none',
   },
   slotBase: {
     position: 'absolute',
-    top: 0,
     borderWidth: 1.2,
     alignItems: 'center',
     justifyContent: 'center',
   },
   stockCountBadge: {
     position: 'absolute',
-    bottom: 4,
-    right: 4,
+    zIndex: 490,
+    backgroundColor: 'rgba(0,0,0,0.65)',
     borderRadius: 6,
     paddingHorizontal: 5,
     paddingVertical: 1,
@@ -1300,10 +867,6 @@ const styles = StyleSheet.create({
     color: '#FFFFFF',
     fontSize: 10,
     fontWeight: '800',
-  },
-  recycleIconBox: {
-    alignItems: 'center',
-    justifyContent: 'center',
   },
   recycleGlyph: {
     fontSize: 26,
@@ -1316,15 +879,5 @@ const styles = StyleSheet.create({
   kingWatermark: {
     fontWeight: '800',
     opacity: 0.55,
-  },
-  animLayerItem: {
-    position: 'absolute',
-    zIndex: 850,
-    elevation: 12,
-  },
-  floatingDragLayer: {
-    position: 'absolute',
-    zIndex: 999,
-    elevation: 16,
   },
 });
