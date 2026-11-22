@@ -20,7 +20,7 @@ function expect(condition: boolean, message: string): void {
   }
 }
 
-const suites: Array<{ name: string; fn: () => void }> = [];
+const suites: { name: string; fn: () => void }[] = [];
 function runTest(name: string, fn: () => void) {
   suites.push({ name, fn });
 }

@@ -197,6 +197,7 @@ export default function App() {
 
       {route === 'game' && activeGame && (
         <GameScreen
+          key={`${activeGame.seed}-${activeGame.drawMode}-${activeGame.dealType}`}
           game={activeGame}
           theme={theme}
           hapticsEnabled={settings.hapticsEnabled}

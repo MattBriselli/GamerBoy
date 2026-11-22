@@ -63,33 +63,28 @@ export function GameScreen({
   const [dealMenuVisible, setDealMenuVisible] = useState(false);
   const wonReportedSeedRef = useRef<string | null>(null);
 
-  // Reset local flags when a fresh deal starts
-  useEffect(() => {
-    setIsAutoCompleting(false);
-    setActiveHint(null);
-  }, [game.seed, game.drawMode, game.dealType]);
-
   // Report win once per completed deal
   useEffect(() => {
     const winKey = `${game.seed}:${game.moves}`;
     if (game.isWon && wonReportedSeedRef.current !== winKey) {
       wonReportedSeedRef.current = winKey;
-      setIsAutoCompleting(false);
       triggerSuccessHaptic(hapticsEnabled);
       onGameWon(game);
     }
   }, [game.isWon, game, hapticsEnabled, onGameWon]);
 
+  const hasMoves = game.moves > 0;
+
   // Game clock starts after first move and pauses on win or modal
   useEffect(() => {
-    if (game.isWon || game.moves === 0 || dealMenuVisible) return;
+    if (game.isWon || !hasMoves || dealMenuVisible) return;
     const timer = setInterval(() => {
       onUpdateGame((prev) =>
         prev.isWon ? prev : { ...prev, elapsedSeconds: prev.elapsedSeconds + 1 }
       );
     }, 1000);
     return () => clearInterval(timer);
-  }, [game.isWon, game.moves > 0, dealMenuVisible, onUpdateGame]);
+  }, [game.isWon, hasMoves, dealMenuVisible, onUpdateGame]);
 
   // Auto-clear hint highlight after 3.2s
   useEffect(() => {

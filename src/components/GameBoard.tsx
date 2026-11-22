@@ -1,16 +1,21 @@
-import React, { useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Animated,
   LayoutChangeEvent,
   PanResponder,
   Pressable,
+  StyleProp,
   StyleSheet,
   Text,
   View,
+  ViewStyle,
 } from 'react-native';
-import { isValidMove, getMovingCards } from '../engine/klondike';
+import {
+  getMovingCards,
+  HintSuggestion,
+  isValidMove,
+} from '../engine/klondike';
 import { Card, GameState, PileLocation } from '../engine/types';
-import { HintSuggestion } from '../engine/klondike';
 import { AppTheme } from '../theme/themes';
 import { PlayingCard } from './PlayingCard';
 
@@ -31,6 +36,79 @@ interface DragSession {
   cardOffsetY: number;
 }
 
+interface InteractiveCardSlotProps {
+  from: PileLocation;
+  originX: number;
+  originY: number;
+  cardOffsetY?: number;
+  style?: StyleProp<ViewStyle>;
+  onGestureStartCheck: (from: PileLocation) => boolean;
+  onGestureMove: (
+    from: PileLocation,
+    originX: number,
+    originY: number,
+    cardOffsetY: number,
+    dx: number,
+    dy: number
+  ) => void;
+  onGestureRelease: (from: PileLocation, dx: number, dy: number) => void;
+  onGestureTerminate: () => void;
+  children: React.ReactNode;
+}
+
+function InteractiveCardSlot({
+  from,
+  originX,
+  originY,
+  cardOffsetY = 22,
+  style,
+  onGestureStartCheck,
+  onGestureMove,
+  onGestureRelease,
+  onGestureTerminate,
+  children,
+}: InteractiveCardSlotProps) {
+  const panHandlers = useMemo(() => {
+    const responder = PanResponder.create({
+      onStartShouldSetPanResponder: () => onGestureStartCheck(from),
+      onMoveShouldSetPanResponder: (_, gesture) =>
+        Math.hypot(gesture.dx, gesture.dy) > 5,
+      onPanResponderMove: (_, gesture) => {
+        onGestureMove(
+          from,
+          originX,
+          originY,
+          cardOffsetY,
+          gesture.dx,
+          gesture.dy
+        );
+      },
+      onPanResponderRelease: (_, gesture) => {
+        onGestureRelease(from, gesture.dx, gesture.dy);
+      },
+      onPanResponderTerminate: () => {
+        onGestureTerminate();
+      },
+    });
+    return responder.panHandlers;
+  }, [
+    from,
+    originX,
+    originY,
+    cardOffsetY,
+    onGestureStartCheck,
+    onGestureMove,
+    onGestureRelease,
+    onGestureTerminate,
+  ]);
+
+  return (
+    <View {...panHandlers} style={style}>
+      {children}
+    </View>
+  );
+}
+
 const FOUNDATION_WATERMARKS = ['♠', '♥', '♣', '♦'];
 
 export function GameBoard({
@@ -44,11 +122,9 @@ export function GameBoard({
   const [layout, setLayout] = useState({ width: 375, height: 520 });
   const [dragSession, setDragSession] = useState<DragSession | null>(null);
   const [hoverTarget, setHoverTarget] = useState<PileLocation | null>(null);
+  const [dragPan] = useState(() => new Animated.ValueXY({ x: 0, y: 0 }));
 
-  const dragPan = useRef(new Animated.ValueXY({ x: 0, y: 0 })).current;
   const dragSessionRef = useRef<DragSession | null>(null);
-  const gameRef = useRef(game);
-  gameRef.current = game;
 
   const metrics = useMemo(() => {
     const horizontalPad = 10;
@@ -79,49 +155,127 @@ export function GameBoard({
     };
   }, [layout.width, layout.height]);
 
+  const gameRef = useRef(game);
   const metricsRef = useRef(metrics);
-  metricsRef.current = metrics;
 
-  const computeDropTarget = (
-    from: PileLocation,
-    centerX: number,
-    centerY: number
-  ): PileLocation | null => {
-    const m = metricsRef.current;
-    const current = gameRef.current;
+  useEffect(() => {
+    gameRef.current = game;
+    metricsRef.current = metrics;
+  }, [game, metrics]);
 
-    // Check Foundation row if dragged near the top right (cols 3..6)
-    if (centerY < m.tableauTop - m.sectionGap * 0.25) {
-      let bestFoundation: { loc: PileLocation; dist: number } | null = null;
-      for (let f = 0; f < 4; f++) {
-        const slotCenterX = m.colX(3 + f) + m.cardWidth / 2;
-        const slotCenterY = m.topPadding + m.cardHeight / 2;
-        const dist = Math.hypot(centerX - slotCenterX, centerY - slotCenterY);
-        const candidate: PileLocation = { zone: 'foundation', index: f };
-        if (dist < m.cardWidth * 1.15 && isValidMove(current, from, candidate)) {
-          if (!bestFoundation || dist < bestFoundation.dist) {
-            bestFoundation = { loc: candidate, dist };
+  const computeDropTarget = useCallback(
+    (from: PileLocation, centerX: number, centerY: number): PileLocation | null => {
+      const m = metricsRef.current;
+      const current = gameRef.current;
+
+      // Check Foundation row if dragged near the top right (cols 3..6)
+      if (centerY < m.tableauTop - m.sectionGap * 0.25) {
+        let bestFoundation: { loc: PileLocation; dist: number } | null = null;
+        for (let f = 0; f < 4; f++) {
+          const slotCenterX = m.colX(3 + f) + m.cardWidth / 2;
+          const slotCenterY = m.topPadding + m.cardHeight / 2;
+          const dist = Math.hypot(centerX - slotCenterX, centerY - slotCenterY);
+          const candidate: PileLocation = { zone: 'foundation', index: f };
+          if (dist < m.cardWidth * 1.15 && isValidMove(current, from, candidate)) {
+            if (!bestFoundation || dist < bestFoundation.dist) {
+              bestFoundation = { loc: candidate, dist };
+            }
+          }
+        }
+        if (bestFoundation) return bestFoundation.loc;
+      }
+
+      // Check 7 Tableau columns horizontally
+      let bestTableau: { loc: PileLocation; dist: number } | null = null;
+      for (let col = 0; col < 7; col++) {
+        const slotCenterX = m.colX(col) + m.cardWidth / 2;
+        const dist = Math.abs(centerX - slotCenterX);
+        const candidate: PileLocation = { zone: 'tableau', index: col };
+        if (dist < m.cardWidth * 0.95 && isValidMove(current, from, candidate)) {
+          if (!bestTableau || dist < bestTableau.dist) {
+            bestTableau = { loc: candidate, dist };
           }
         }
       }
-      if (bestFoundation) return bestFoundation.loc;
-    }
 
-    // Check 7 Tableau columns horizontally
-    let bestTableau: { loc: PileLocation; dist: number } | null = null;
-    for (let col = 0; col < 7; col++) {
-      const slotCenterX = m.colX(col) + m.cardWidth / 2;
-      const dist = Math.abs(centerX - slotCenterX);
-      const candidate: PileLocation = { zone: 'tableau', index: col };
-      if (dist < m.cardWidth * 0.95 && isValidMove(current, from, candidate)) {
-        if (!bestTableau || dist < bestTableau.dist) {
-          bestTableau = { loc: candidate, dist };
-        }
+      return bestTableau ? bestTableau.loc : null;
+    },
+    []
+  );
+
+  const handleGestureStartCheck = useCallback((from: PileLocation) => {
+    dragPan.setValue({ x: 0, y: 0 });
+    const cards = getMovingCards(gameRef.current, from);
+    return Boolean(cards && cards.length > 0);
+  }, [dragPan]);
+
+  const handleGestureMove = useCallback(
+    (
+      from: PileLocation,
+      originX: number,
+      originY: number,
+      cardOffsetY: number,
+      dx: number,
+      dy: number
+    ) => {
+      const dist = Math.hypot(dx, dy);
+      if (!dragSessionRef.current && dist >= 6) {
+        const cards = getMovingCards(gameRef.current, from);
+        if (!cards || cards.length === 0) return;
+        const session: DragSession = {
+          from,
+          cards,
+          originX,
+          originY,
+          cardOffsetY,
+        };
+        dragSessionRef.current = session;
+        setDragSession(session);
       }
-    }
 
-    return bestTableau ? bestTableau.loc : null;
-  };
+      if (dragSessionRef.current) {
+        dragPan.setValue({ x: dx, y: dy });
+        const m = metricsRef.current;
+        const centerX = originX + dx + m.cardWidth / 2;
+        const centerY = originY + dy + m.cardHeight / 2;
+        setHoverTarget(computeDropTarget(from, centerX, centerY));
+      }
+    },
+    [computeDropTarget, dragPan]
+  );
+
+  const handleGestureRelease = useCallback(
+    (from: PileLocation, dx: number, dy: number) => {
+      const active = dragSessionRef.current;
+      const dist = Math.hypot(dx, dy);
+
+      dragSessionRef.current = null;
+      setDragSession(null);
+      setHoverTarget(null);
+      dragPan.setValue({ x: 0, y: 0 });
+
+      if (!active || dist < 7) {
+        onSmartTap(from);
+        return;
+      }
+
+      const m = metricsRef.current;
+      const centerX = active.originX + dx + m.cardWidth / 2;
+      const centerY = active.originY + dy + m.cardHeight / 2;
+      const target = computeDropTarget(active.from, centerX, centerY);
+      if (target) {
+        onDropMove(active.from, target);
+      }
+    },
+    [computeDropTarget, dragPan, onDropMove, onSmartTap]
+  );
+
+  const handleGestureTerminate = useCallback(() => {
+    dragSessionRef.current = null;
+    setDragSession(null);
+    setHoverTarget(null);
+    dragPan.setValue({ x: 0, y: 0 });
+  }, [dragPan]);
 
   const getColumnOffsets = (pile: Card[]) => {
     const m = metrics;
@@ -155,77 +309,6 @@ export function GameBoard({
     return offsets;
   };
 
-  const makeCardResponder = (
-    from: PileLocation,
-    originX: number,
-    originY: number,
-    cardOffsetY: number = 22
-  ) =>
-    PanResponder.create({
-      onStartShouldSetPanResponder: () => {
-        const cards = getMovingCards(gameRef.current, from);
-        return Boolean(cards && cards.length > 0);
-      },
-      onMoveShouldSetPanResponder: (_, gesture) =>
-        Math.hypot(gesture.dx, gesture.dy) > 5,
-      onPanResponderGrant: () => {
-        dragPan.setValue({ x: 0, y: 0 });
-      },
-      onPanResponderMove: (_, gesture) => {
-        const dist = Math.hypot(gesture.dx, gesture.dy);
-        if (!dragSessionRef.current && dist >= 6) {
-          const cards = getMovingCards(gameRef.current, from);
-          if (!cards || cards.length === 0) return;
-          const session: DragSession = {
-            from,
-            cards,
-            originX,
-            originY,
-            cardOffsetY,
-          };
-          dragSessionRef.current = session;
-          setDragSession(session);
-        }
-
-        if (dragSessionRef.current) {
-          dragPan.setValue({ x: gesture.dx, y: gesture.dy });
-          const m = metricsRef.current;
-          const centerX = originX + gesture.dx + m.cardWidth / 2;
-          const centerY = originY + gesture.dy + m.cardHeight / 2;
-          const target = computeDropTarget(from, centerX, centerY);
-          setHoverTarget(target);
-        }
-      },
-      onPanResponderRelease: (_, gesture) => {
-        const active = dragSessionRef.current;
-        const dist = Math.hypot(gesture.dx, gesture.dy);
-
-        dragSessionRef.current = null;
-        setDragSession(null);
-        setHoverTarget(null);
-        dragPan.setValue({ x: 0, y: 0 });
-
-        if (!active || dist < 7) {
-          onSmartTap(from);
-          return;
-        }
-
-        const m = metricsRef.current;
-        const centerX = active.originX + gesture.dx + m.cardWidth / 2;
-        const centerY = active.originY + gesture.dy + m.cardHeight / 2;
-        const target = computeDropTarget(active.from, centerX, centerY);
-        if (target) {
-          onDropMove(active.from, target);
-        }
-      },
-      onPanResponderTerminate: () => {
-        dragSessionRef.current = null;
-        setDragSession(null);
-        setHoverTarget(null);
-        dragPan.setValue({ x: 0, y: 0 });
-      },
-    });
-
   const handleLayout = (e: LayoutChangeEvent) => {
     const { width, height } = e.nativeEvent.layout;
     if (width > 0 && height > 0) {
@@ -258,11 +341,12 @@ export function GameBoard({
     return hoverTarget.zone === zone && hoverTarget.index === index;
   };
 
-  // Visible waste cards (up to 3 fanned in Draw 3, or top 1 in Draw 1, though showing up to 3 fanned in Draw 3 is classic)
-  const visibleWasteCount = game.drawMode === 3 ? Math.min(3, game.waste.length) : Math.min(1, game.waste.length);
+  const visibleWasteCount =
+    game.drawMode === 3
+      ? Math.min(3, game.waste.length)
+      : Math.min(1, game.waste.length);
   const visibleWaste = game.waste.slice(game.waste.length - visibleWasteCount);
   const wasteFanStep = Math.round(metrics.cardWidth * 0.34);
-
   const slotRadius = Math.max(6, Math.round(metrics.cardWidth * 0.12));
 
   return (
@@ -372,16 +456,16 @@ export function GameBoard({
                   );
                 }
 
-                const responder = makeCardResponder(
-                  { zone: 'waste' },
-                  metrics.colX(1) + xOffset,
-                  metrics.topPadding
-                );
-
                 return (
-                  <View
+                  <InteractiveCardSlot
                     key={card.id}
-                    {...responder.panHandlers}
+                    from={{ zone: 'waste' }}
+                    originX={metrics.colX(1) + xOffset}
+                    originY={metrics.topPadding}
+                    onGestureStartCheck={handleGestureStartCheck}
+                    onGestureMove={handleGestureMove}
+                    onGestureRelease={handleGestureRelease}
+                    onGestureTerminate={handleGestureTerminate}
                     style={{
                       position: 'absolute',
                       left: xOffset,
@@ -396,7 +480,7 @@ export function GameBoard({
                       theme={theme}
                       highlighted={isHintSource('waste')}
                     />
-                  </View>
+                  </InteractiveCardSlot>
                 );
               })
             )}
@@ -413,53 +497,63 @@ export function GameBoard({
             const draggingTop = topCard ? isDraggingCardId(topCard.id) : false;
             const displayCard = draggingTop ? underCard : topCard;
 
-            const responder = topCard
-              ? makeCardResponder(
-                  { zone: 'foundation', index: fIdx },
-                  left,
-                  metrics.topPadding
-                )
-              : null;
+            const slotStyle: StyleProp<ViewStyle> = [
+              styles.slotBase,
+              {
+                left,
+                width: metrics.cardWidth,
+                height: metrics.cardHeight,
+                borderRadius: slotRadius,
+                backgroundColor: highlightedSlot ? theme.accentSoft : theme.slotBg,
+                borderColor: highlightedSlot ? theme.hintGlow : theme.slotBorder,
+                borderWidth: highlightedSlot ? 2 : 1.2,
+              },
+            ];
 
-            return (
-              <View
-                key={`foundation-${fIdx}`}
-                {...(responder ? responder.panHandlers : {})}
+            const inner = displayCard ? (
+              <PlayingCard
+                card={displayCard}
+                width={metrics.cardWidth}
+                height={metrics.cardHeight}
+                theme={theme}
+                highlighted={highlightedSlot}
+              />
+            ) : (
+              <Text
                 style={[
-                  styles.slotBase,
+                  styles.foundationWatermark,
                   {
-                    left,
-                    width: metrics.cardWidth,
-                    height: metrics.cardHeight,
-                    borderRadius: slotRadius,
-                    backgroundColor: highlightedSlot ? theme.accentSoft : theme.slotBg,
-                    borderColor: highlightedSlot ? theme.hintGlow : theme.slotBorder,
-                    borderWidth: highlightedSlot ? 2 : 1.2,
+                    color: theme.slotBorder,
+                    fontSize: Math.round(metrics.cardWidth * 0.42),
                   },
                 ]}
               >
-                {displayCard ? (
-                  <PlayingCard
-                    card={displayCard}
-                    width={metrics.cardWidth}
-                    height={metrics.cardHeight}
-                    theme={theme}
-                    highlighted={highlightedSlot}
-                  />
-                ) : (
-                  <Text
-                    style={[
-                      styles.foundationWatermark,
-                      {
-                        color: theme.slotBorder,
-                        fontSize: Math.round(metrics.cardWidth * 0.42),
-                      },
-                    ]}
-                  >
-                    {FOUNDATION_WATERMARKS[fIdx]}
-                  </Text>
-                )}
-              </View>
+                {FOUNDATION_WATERMARKS[fIdx]}
+              </Text>
+            );
+
+            if (!topCard) {
+              return (
+                <View key={`foundation-${fIdx}`} style={slotStyle}>
+                  {inner}
+                </View>
+              );
+            }
+
+            return (
+              <InteractiveCardSlot
+                key={`foundation-${fIdx}`}
+                from={{ zone: 'foundation', index: fIdx }}
+                originX={left}
+                originY={metrics.topPadding}
+                onGestureStartCheck={handleGestureStartCheck}
+                onGestureMove={handleGestureMove}
+                onGestureRelease={handleGestureRelease}
+                onGestureTerminate={handleGestureTerminate}
+                style={slotStyle}
+              >
+                {inner}
+              </InteractiveCardSlot>
             );
           })}
         </View>
@@ -548,17 +642,17 @@ export function GameBoard({
                     );
                   }
 
-                  const responder = makeCardResponder(
-                    { zone: 'tableau', index: colIdx, cardIndex: cIdx },
-                    left,
-                    cardOriginY,
-                    stepUpOffset
-                  );
-
                   return (
-                    <View
+                    <InteractiveCardSlot
                       key={card.id}
-                      {...responder.panHandlers}
+                      from={{ zone: 'tableau', index: colIdx, cardIndex: cIdx }}
+                      originX={left}
+                      originY={cardOriginY}
+                      cardOffsetY={stepUpOffset}
+                      onGestureStartCheck={handleGestureStartCheck}
+                      onGestureMove={handleGestureMove}
+                      onGestureRelease={handleGestureRelease}
+                      onGestureTerminate={handleGestureTerminate}
                       style={{
                         position: 'absolute',
                         left: 0,
@@ -572,7 +666,7 @@ export function GameBoard({
                         theme={theme}
                         highlighted={cardHighlighted}
                       />
-                    </View>
+                    </InteractiveCardSlot>
                   );
                 })}
               </View>

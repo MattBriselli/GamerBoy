@@ -60,7 +60,7 @@ export function DailyScreen({
   const calendarCells = useMemo(() => {
     const firstDayWeekday = new Date(viewYear, viewMonth, 1).getDay();
     const daysInMonth = new Date(viewYear, viewMonth + 1, 0).getDate();
-    const cells: Array<{ day: number; dateStr: string; isFuture: boolean } | null> = [];
+    const cells: ({ day: number; dateStr: string; isFuture: boolean } | null)[] = [];
 
     for (let i = 0; i < firstDayWeekday; i++) {
       cells.push(null);

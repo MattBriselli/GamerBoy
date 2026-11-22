@@ -2,19 +2,23 @@ import React, { useEffect, useState } from 'react';
 import { Platform, StyleSheet, TurboModuleRegistry, View } from 'react-native';
 import * as TrackingTransparency from 'expo-tracking-transparency';
 import { getBannerAdUnitId } from '../config/ads';
-import { AppTheme } from '../theme/themes';
 import { AdBannerPreview as FallbackBanner, AdBannerProps } from './AdBannerPreview';
 
 export type { AdBannerProps };
 
-// Check if native Google Mobile Ads binary is linked (true in EAS / Dev Client builds, false in Expo Go)
+type GmaModule = typeof import('react-native-google-mobile-ads');
+
+// True in EAS / Native Dev Client builds; false in stock Expo Go
 const isNativeAdMobAvailable = Boolean(
   TurboModuleRegistry.get('RNGoogleMobileAdsModule')
 );
 
-let initializationPromise: Promise<{ personalized: boolean }> | null = null;
+let initializationPromise: Promise<{ personalized: boolean; gma: GmaModule }> | null = null;
 
-async function ensureAdsInitialized(): Promise<{ personalized: boolean }> {
+async function ensureAdsInitialized(): Promise<{
+  personalized: boolean;
+  gma: GmaModule;
+}> {
   if (initializationPromise) return initializationPromise;
 
   initializationPromise = (async () => {
@@ -35,8 +39,8 @@ async function ensureAdsInitialized(): Promise<{ personalized: boolean }> {
       }
     }
 
-    // 2. Initialize Google Mobile Ads v17 SDK with child/family-safe G/PG content rating
-    const gma = require('react-native-google-mobile-ads') as typeof import('react-native-google-mobile-ads');
+    // 2. Dynamically load & initialize Google Mobile Ads v17 SDK
+    const gma = await import('react-native-google-mobile-ads');
     const mobileAds = gma.default;
 
     try {
@@ -52,7 +56,7 @@ async function ensureAdsInitialized(): Promise<{ personalized: boolean }> {
     });
 
     await mobileAds().initialize();
-    return { personalized };
+    return { personalized, gma };
   })();
 
   return initializationPromise;
@@ -62,18 +66,23 @@ export function AdBanner({ theme, placement = 'menu' }: AdBannerProps) {
   const [sdkState, setSdkState] = useState<{
     ready: boolean;
     personalized: boolean;
+    gma: GmaModule | null;
     failed: boolean;
-  }>({ ready: false, personalized: false, failed: false });
+  }>({ ready: false, personalized: false, gma: null, failed: false });
 
   useEffect(() => {
     if (!isNativeAdMobAvailable) return;
     let mounted = true;
     ensureAdsInitialized()
-      .then(({ personalized }) => {
-        if (mounted) setSdkState({ ready: true, personalized, failed: false });
+      .then(({ personalized, gma }) => {
+        if (mounted) {
+          setSdkState({ ready: true, personalized, gma, failed: false });
+        }
       })
       .catch(() => {
-        if (mounted) setSdkState({ ready: false, personalized: false, failed: true });
+        if (mounted) {
+          setSdkState({ ready: false, personalized: false, gma: null, failed: true });
+        }
       });
     return () => {
       mounted = false;
@@ -84,7 +93,7 @@ export function AdBanner({ theme, placement = 'menu' }: AdBannerProps) {
     return <FallbackBanner theme={theme} placement={placement} />;
   }
 
-  if (!sdkState.ready) {
+  if (!sdkState.ready || !sdkState.gma) {
     return (
       <View
         style={[
@@ -95,9 +104,7 @@ export function AdBanner({ theme, placement = 'menu' }: AdBannerProps) {
     );
   }
 
-  const { BannerAd: NativeBannerAd, BannerAdSize, TestIds } =
-    require('react-native-google-mobile-ads') as typeof import('react-native-google-mobile-ads');
-
+  const { BannerAd: NativeBannerAd, BannerAdSize, TestIds } = sdkState.gma;
   const unitId = __DEV__ ? TestIds.ADAPTIVE_BANNER : getBannerAdUnitId();
 
   return (
