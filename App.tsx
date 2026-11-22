@@ -80,7 +80,7 @@ export default function App() {
   }, []);
 
   const startDeal = useCallback(
-    (dealType: DealType, customSeed?: number, dailyDate?: string) => {
+    (dealType: DealType, customSeed?: number, dailyDate?: string): GameState => {
       const drawMode = settings.drawMode;
       let seed = customSeed;
       if (seed === undefined) {
@@ -103,6 +103,7 @@ export default function App() {
       setActiveGame(freshGame);
       recordNewDealStarted(seed);
       setRoute('game');
+      return freshGame;
     },
     [settings.drawMode, stats.recentSeeds, recordNewDealStarted]
   );
@@ -197,7 +198,6 @@ export default function App() {
 
       {route === 'game' && activeGame && (
         <GameScreen
-          key={`${activeGame.seed}-${activeGame.drawMode}-${activeGame.dealType}`}
           game={activeGame}
           theme={theme}
           hapticsEnabled={settings.hapticsEnabled}

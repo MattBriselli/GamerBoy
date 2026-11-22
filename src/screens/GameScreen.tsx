@@ -10,7 +10,11 @@ import { LinearGradient } from 'expo-linear-gradient';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { AdBanner } from '../components/AdBanner';
 import { BottomToolbar } from '../components/BottomToolbar';
-import { GameBoard } from '../components/GameBoard';
+import {
+  DragOriginMap,
+  GameBoard,
+  GameBoardHandle,
+} from '../components/GameBoard';
 import { formatDuration, TopHud } from '../components/TopHud';
 import {
   canAutoComplete,
@@ -38,9 +42,9 @@ export interface GameScreenProps {
   highScore: number;
   onUpdateGame: (updater: (prev: GameState) => GameState) => void;
   onGameWon: (finalGame: GameState) => void;
-  onNewWinningDeal: () => void;
-  onNewStandardDeal: () => void;
-  onReplayCurrentSeed: () => void;
+  onNewWinningDeal: () => GameState;
+  onNewStandardDeal: () => GameState;
+  onReplayCurrentSeed: () => GameState;
   onBackToMenu: () => void;
   onOpenStats: () => void;
 }
@@ -61,7 +65,14 @@ export function GameScreen({
   const [activeHint, setActiveHint] = useState<HintSuggestion | null>(null);
   const [isAutoCompleting, setIsAutoCompleting] = useState(false);
   const [dealMenuVisible, setDealMenuVisible] = useState(false);
+
+  const boardRef = useRef<GameBoardHandle | null>(null);
   const wonReportedSeedRef = useRef<string | null>(null);
+  const latestGameRef = useRef(game);
+
+  useEffect(() => {
+    latestGameRef.current = game;
+  }, [game]);
 
   // Report win once per completed deal
   useEffect(() => {
@@ -93,30 +104,42 @@ export function GameScreen({
     return () => clearTimeout(t);
   }, [activeHint]);
 
-  // Cascading Auto-Complete stepper
+  // Cascading Auto-Complete stepper with smooth overlapping card flights
   useEffect(() => {
     if (!isAutoCompleting || game.isWon) return;
     const stepTimer = setTimeout(() => {
-      onUpdateGame((prev) => {
-        const next = stepAutoComplete(prev);
-        if (!next) {
-          setIsAutoCompleting(false);
-          return prev;
-        }
-        triggerLightHaptic(hapticsEnabled);
-        return next;
-      });
-    }, 85);
+      const current = latestGameRef.current;
+      const next = stepAutoComplete(current);
+      if (!next) {
+        setIsAutoCompleting(false);
+        return;
+      }
+      triggerLightHaptic(hapticsEnabled);
+      boardRef.current?.animateTransition(current, next);
+      onUpdateGame(() => next);
+    }, 95);
     return () => clearTimeout(stepTimer);
   }, [isAutoCompleting, game, hapticsEnabled, onUpdateGame]);
 
   const autoCompleteReady = useMemo(() => canAutoComplete(game), [game]);
 
+  const triggerFreshDealWithAnim = (dealFactory: () => GameState) => {
+    setDealMenuVisible(false);
+    setIsAutoCompleting(false);
+    setActiveHint(null);
+    const fresh = dealFactory();
+    boardRef.current?.animateFreshDeal(fresh);
+  };
+
   const handleStockPress = () => {
     if (isAutoCompleting || game.isWon) return;
     setActiveHint(null);
-    triggerLightHaptic(hapticsEnabled);
-    onUpdateGame((prev) => drawOrRecycleStock(prev));
+    const next = drawOrRecycleStock(game);
+    if (next !== game) {
+      triggerLightHaptic(hapticsEnabled);
+      boardRef.current?.animateTransition(game, next);
+      onUpdateGame(() => next);
+    }
   };
 
   const handleSmartTap = (from: PileLocation) => {
@@ -136,11 +159,16 @@ export function GameScreen({
       } else {
         triggerLightHaptic(hapticsEnabled);
       }
+      boardRef.current?.animateTransition(game, next);
       onUpdateGame(() => next);
     }
   };
 
-  const handleDropMove = (from: PileLocation, to: PileLocation) => {
+  const handleDropMove = (
+    from: PileLocation,
+    to: PileLocation,
+    dragOrigins: DragOriginMap
+  ) => {
     if (isAutoCompleting || game.isWon) return;
     setActiveHint(null);
 
@@ -151,6 +179,7 @@ export function GameScreen({
       } else {
         triggerLightHaptic(hapticsEnabled);
       }
+      boardRef.current?.animateTransition(game, next, dragOrigins);
       onUpdateGame(() => next);
     } else {
       triggerWarningHaptic(hapticsEnabled);
@@ -160,8 +189,10 @@ export function GameScreen({
   const handleUndo = () => {
     if (isAutoCompleting || game.history.length === 0) return;
     setActiveHint(null);
+    const next = undoMove(game);
     triggerLightHaptic(hapticsEnabled);
-    onUpdateGame((prev) => undoMove(prev));
+    boardRef.current?.animateTransition(game, next);
+    onUpdateGame(() => next);
   };
 
   const handleHint = () => {
@@ -197,6 +228,7 @@ export function GameScreen({
         />
 
         <GameBoard
+          ref={boardRef}
           game={game}
           theme={theme}
           activeHint={activeHint}
@@ -209,8 +241,8 @@ export function GameScreen({
           theme={theme}
           canUndo={game.history.length > 0}
           undoCount={game.history.length}
-          showAutoComplete={autoCompleteReady}
-          isAutoCompleting={isAutoCompleting}
+          showAutoComplete={autoCompleteReady && !game.isWon}
+          isAutoCompleting={isAutoCompleting && !game.isWon}
           hintMessage={activeHint?.description ?? null}
           onNewDealPress={() => setDealMenuVisible(true)}
           onSettingsPress={onOpenStats}
@@ -249,10 +281,7 @@ export function GameScreen({
             </Text>
 
             <Pressable
-              onPress={() => {
-                setDealMenuVisible(false);
-                onNewWinningDeal();
-              }}
+              onPress={() => triggerFreshDealWithAnim(onNewWinningDeal)}
               style={[styles.sheetPrimaryBtn, { backgroundColor: theme.accent }]}
             >
               <Text style={[styles.sheetPrimaryText, { color: theme.accentText }]}>
@@ -261,10 +290,7 @@ export function GameScreen({
             </Pressable>
 
             <Pressable
-              onPress={() => {
-                setDealMenuVisible(false);
-                onNewStandardDeal();
-              }}
+              onPress={() => triggerFreshDealWithAnim(onNewStandardDeal)}
               style={[
                 styles.sheetOptionBtn,
                 { backgroundColor: theme.surface, borderColor: theme.surfaceBorder },
@@ -276,10 +302,7 @@ export function GameScreen({
             </Pressable>
 
             <Pressable
-              onPress={() => {
-                setDealMenuVisible(false);
-                onReplayCurrentSeed();
-              }}
+              onPress={() => triggerFreshDealWithAnim(onReplayCurrentSeed)}
               style={[
                 styles.sheetOptionBtn,
                 { backgroundColor: theme.surface, borderColor: theme.surfaceBorder },
@@ -368,8 +391,11 @@ export function GameScreen({
             </View>
 
             <Pressable
-              onPress={onNewWinningDeal}
-              style={[styles.sheetPrimaryBtn, { backgroundColor: theme.accent, width: '100%' }]}
+              onPress={() => triggerFreshDealWithAnim(onNewWinningDeal)}
+              style={[
+                styles.sheetPrimaryBtn,
+                { backgroundColor: theme.accent, width: '100%' },
+              ]}
             >
               <Text style={[styles.sheetPrimaryText, { color: theme.accentText }]}>
                 ✦ Play Next Winning Deal
