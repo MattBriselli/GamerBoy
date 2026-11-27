@@ -1,7 +1,7 @@
 {
   "expo": {
     "name": "GamerBoy Solitaire",
-    "slug": "gamerboy-solitaire",
+    "slug": "gamerboy",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
@@ -26,7 +26,10 @@
         "backgroundColor": "#0C4A31",
         "foregroundImage": "./assets/android-icon-foreground.png"
       },
-      "predictiveBackGestureEnabled": false
+      "predictiveBackGestureEnabled": false,
+      "permissions": [
+        "com.google.android.gms.permission.AD_ID"
+      ]
     },
     "web": {
       "favicon": "./assets/favicon.png"
@@ -47,6 +50,12 @@
           "userTrackingUsageDescription": "This identifier will be used to deliver relevant, non-intrusive banner ads that keep GamerBoy Solitaire free to play."
         }
       ]
-    ]
+    ],
+    "extra": {
+      "eas": {
+        "projectId": "a2159505-a8f5-4301-a129-3a0950de12cd"
+      }
+    },
+    "owner": "matt-breezy"
   }
 }
