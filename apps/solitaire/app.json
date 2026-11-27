@@ -44,7 +44,7 @@
       [
         "react-native-google-mobile-ads",
         {
-          "androidAppId": "ca-app-pub-3940256099942544~3347511713",
+          "androidAppId": "ca-app-pub-9445578878788319~1228453500",
           "iosAppId": "ca-app-pub-3940256099942544~1458002511",
           "delayAppMeasurementInit": true,
           "userTrackingUsageDescription": "This identifier will be used to deliver relevant, non-intrusive banner ads that keep GamerBoy Solitaire free to play."

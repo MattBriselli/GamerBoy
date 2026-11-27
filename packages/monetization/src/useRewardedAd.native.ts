@@ -31,6 +31,7 @@ export function useRewardedAd(config: AdUnitConfig): RewardedAdHandle {
         const unitId = __DEV__
           ? gma.TestIds.REWARDED
           : resolveAdUnitId('rewarded', config);
+        if (!unitId) return; // format disabled: isReady stays false, so the button stays hidden
 
         const rewarded = gma.RewardedAd.createForAdRequest(unitId, {
           requestNonPersonalizedAdsOnly: !personalized,

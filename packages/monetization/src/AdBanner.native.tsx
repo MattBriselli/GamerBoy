@@ -69,6 +69,10 @@ export function AdBanner({
     ? TestIds.ADAPTIVE_BANNER
     : resolveAdUnitId('banner', config);
 
+  if (!unitId) {
+    return null;
+  }
+
   return (
     <View
       style={[

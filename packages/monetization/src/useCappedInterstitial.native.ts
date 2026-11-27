@@ -38,6 +38,7 @@ export function useCappedInterstitial(
         const unitId = __DEV__
           ? gma.TestIds.INTERSTITIAL
           : resolveAdUnitId('interstitial', config);
+        if (!unitId) return; // format disabled in this build
 
         const interstitial = gma.InterstitialAd.createForAdRequest(unitId, {
           requestNonPersonalizedAdsOnly: !personalized,

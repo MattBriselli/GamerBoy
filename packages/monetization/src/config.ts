@@ -33,10 +33,16 @@ export const GOOGLE_TEST_UNITS = {
   })!,
 };
 
+/**
+ * Returns the ad unit for the current platform, Google test units in __DEV__,
+ * or `null` in release builds when no unit is configured. A null unit disables
+ * that ad format entirely (e.g. ship banner-only by leaving the interstitial and
+ * rewarded EAS env vars unset).
+ */
 export function resolveAdUnitId(
   format: keyof AdUnitConfig,
   config: AdUnitConfig
-): string {
+): string | null {
   if (__DEV__) {
     return GOOGLE_TEST_UNITS[format];
   }
@@ -47,7 +53,7 @@ export function resolveAdUnitId(
   if (Platform.OS === 'android' && units.android) {
     return units.android;
   }
-  return GOOGLE_TEST_UNITS[format];
+  return null;
 }
 
 export interface StudioGameEntry {
