@@ -1,0 +1,32 @@
+{
+  "name": "@gamerboy/solitaire",
+  "version": "1.0.0",
+  "main": "index.ts",
+  "private": true,
+  "dependencies": {
+    "@gamerboy/card-kit": "*",
+    "@gamerboy/core": "*",
+    "@gamerboy/monetization": "*",
+    "@gamerboy/multiplayer": "*",
+    "@react-native-async-storage/async-storage": "2.2.0",
+    "expo": "~58.0.26",
+    "expo-haptics": "~58.0.8",
+    "expo-linear-gradient": "~58.0.4",
+    "expo-status-bar": "~58.0.5",
+    "expo-tracking-transparency": "~58.1.0",
+    "react": "19.3.0",
+    "react-dom": "19.3.0",
+    "react-native": "0.88.1",
+    "react-native-google-mobile-ads": "^17.4.0",
+    "react-native-safe-area-context": "~5.11.1",
+    "react-native-web": "^0.21.4"
+  },
+  "scripts": {
+    "start": "expo start",
+    "android": "expo start --android",
+    "ios": "expo start --ios",
+    "web": "expo start --web",
+    "typecheck": "tsc --noEmit",
+    "test": "tsc -p tsconfig.test.json && mkdir -p /tmp/gamerboy-tests/node_modules/@gamerboy && ln -sfn /tmp/gamerboy-tests/packages/core/src /tmp/gamerboy-tests/node_modules/@gamerboy/core && ln -sfn /tmp/gamerboy-tests/packages/card-kit/src /tmp/gamerboy-tests/node_modules/@gamerboy/card-kit && node /tmp/gamerboy-tests/apps/solitaire/tests/engine.test.js"
+  }
+}

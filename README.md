@@ -1,31 +1,36 @@
-# GamerBoy Solitaire
+# GamerBoy Studio Monorepo
 
-A **Modern Classic** Klondike Solitaire mobile game built with **React Native + Expo (TypeScript)** for **iOS** and **Android**, monetized with **Google AdMob Anchored Adaptive Banner Ads**.
+A shared-package **React Native + Expo (TypeScript)** monorepo for launching standalone mobile games on **iOS** and **Android** with shared monetization, themes, card UI, and multiplayer foundations.
 
-## Features
+## Workspace Layout
 
-- **Klondike Solitaire (Draw 1 & Draw 3)** with standard scoring, move counter, and active play timer.
-- **Dual Controls**: Smart single-tap auto-move **plus** smooth 60fps single-card and multi-card stack drag-and-drop.
-- **Guaranteed Winning Deals**: Built-in heuristic Klondike solver + verified seed pool so every "Winning Deal" is 100% solvable.
-- **Daily Challenge & Monthly Crowns**: Deterministic `YYYY-MM-DD` solvable daily boards, interactive monthly calendar, and crown tracker.
-- **Unlimited Undo, Smart Hints & Cascading Auto-Complete**.
-- **Three Table Themes**: *Emerald Felt*, *Midnight Slate (Dark)*, and *Warm Ivory (Light)*.
-- **Automatic Local Persistence**: Mid-game state, lifetime stats, streaks, and settings auto-saved via `AsyncStorage`.
-- **Store-Ready AdMob Integration**: Native `react-native-google-mobile-ads` v17 with iOS App Tracking Transparency (ATT), UMP consent hookup, safe-area separation, and Web/Expo Go preview fallback.
+```text
+GamerBoy/
+├── packages/
+│   ├── core/          # @gamerboy/core — themes, haptics, AsyncStorage helpers, deterministic PRNG
+│   ├── card-kit/      # @gamerboy/card-kit — 52-card types, deck utils, Modern Classic PlayingCard
+│   ├── monetization/  # @gamerboy/monetization — AdMob (Banner, Capped Interstitial, Rewarded), ATT/UMP, Cross-Promo
+│   └── multiplayer/   # @gamerboy/multiplayer — game-agnostic rooms, invite codes, quick-match & sync contracts
+├── apps/
+│   └── solitaire/     # @gamerboy/solitaire — Standalone Klondike Solitaire app (com.gamerboy.solitaire)
+└── docs/              # GitHub Pages Support, Privacy Policy & app-ads.txt
+```
 
 ## Quick Start
 
 ```bash
-# Run unit tests & TypeScript typecheck
-npm test
-npm run typecheck
+# Install workspace dependencies
+npm install
 
-# Launch interactive preview (Web / iOS / Android)
+# Run checks across the entire studio monorepo
+npm run lint
+npm run typecheck
+npm test
+
+# Launch GamerBoy Solitaire (Web / iOS / Android)
 npm run web
 npm run ios
 npm run android
 ```
 
-> **Note on Native AdMob Banners:** `react-native-google-mobile-ads` includes custom native iOS/Android code. On Web or stock Expo Go, `<AdBanner />` automatically renders a safe-area preview banner slot. To see live Google Test Banner ads on iOS Simulator or Android Emulator, build a native dev client (`npx expo run:ios` or `npx expo run:android`).
-
-See [STORE_SUBMISSION_GUIDE.md](./STORE_SUBMISSION_GUIDE.md) for configuring production AdMob IDs and submitting to the App Store and Google Play.
+See [STORE_SUBMISSION_GUIDE.md](./STORE_SUBMISSION_GUIDE.md) for configuring production AdMob IDs and submitting apps to the Apple App Store and Google Play Store.

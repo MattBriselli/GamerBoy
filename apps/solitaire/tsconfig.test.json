@@ -1,0 +1,17 @@
+{
+  "compilerOptions": {
+    "strict": true,
+    "module": "commonjs",
+    "target": "es2022",
+    "esModuleInterop": true,
+    "rootDir": "../..",
+    "outDir": "/tmp/gamerboy-tests",
+    "paths": {
+      "@gamerboy/core/*": ["../../packages/core/src/*"],
+      "@gamerboy/card-kit/*": ["../../packages/card-kit/src/*"]
+    }
+  },
+  "files": [
+    "tests/engine.test.ts"
+  ]
+}

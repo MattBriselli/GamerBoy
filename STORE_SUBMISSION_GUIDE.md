@@ -44,7 +44,7 @@ Both Apple and Google **require** a live public HTTPS Privacy Policy URL before 
 3. Repeat **Apps → Add app** for **Android**:
    - Copy your **Android App ID** (`ca-app-pub-1234567890123456~3333333333`).
    - Create a **Banner** ad unit and copy your **Android Banner Ad Unit ID** (`ca-app-pub-1234567890123456/4444444444`).
-4. Paste your **App IDs** into `app.json` (replacing the two Google sample IDs under `"react-native-google-mobile-ads"`):
+4. Paste your **App IDs** into `apps/solitaire/app.json` (replacing the two Google sample IDs under `"react-native-google-mobile-ads"`):
    ```json
    [
      "react-native-google-mobile-ads",
@@ -62,16 +62,20 @@ Both Apple and Google **require** a live public HTTPS Privacy Policy URL before 
 
 ## Step 4: Link Expo EAS & Add Your Banner Unit IDs
 
-Run these commands inside `/Users/M/Dev/GamerBoy`:
+Run these commands inside `/Users/M/Dev/GamerBoy/apps/solitaire`:
 
 ```bash
 # 1. Log into your free Expo account and link the project
 npx eas-cli@latest login
 npx eas-cli@latest init
 
-# 2. Save your production AdMob Banner Ad Unit IDs into EAS Cloud Environment Variables
-npx eas-cli@latest env:create --name EXPO_PUBLIC_ADMOB_IOS_BANNER_ID --value "ca-app-pub-XXXX/YYYY" --environment production --visibility plaintext
-npx eas-cli@latest env:create --name EXPO_PUBLIC_ADMOB_ANDROID_BANNER_ID --value "ca-app-pub-XXXX/ZZZZ" --environment production --visibility plaintext
+# 2. Save your production AdMob Banner, Interstitial & Rewarded Unit IDs into EAS Cloud Environment Variables
+npx eas-cli@latest env:create --name EXPO_PUBLIC_ADMOB_IOS_BANNER_ID --value "ca-app-pub-XXXX/1111" --environment production --visibility plaintext
+npx eas-cli@latest env:create --name EXPO_PUBLIC_ADMOB_ANDROID_BANNER_ID --value "ca-app-pub-XXXX/2222" --environment production --visibility plaintext
+npx eas-cli@latest env:create --name EXPO_PUBLIC_ADMOB_IOS_INTERSTITIAL_ID --value "ca-app-pub-XXXX/3333" --environment production --visibility plaintext
+npx eas-cli@latest env:create --name EXPO_PUBLIC_ADMOB_ANDROID_INTERSTITIAL_ID --value "ca-app-pub-XXXX/4444" --environment production --visibility plaintext
+npx eas-cli@latest env:create --name EXPO_PUBLIC_ADMOB_IOS_REWARDED_ID --value "ca-app-pub-XXXX/5555" --environment production --visibility plaintext
+npx eas-cli@latest env:create --name EXPO_PUBLIC_ADMOB_ANDROID_REWARDED_ID --value "ca-app-pub-XXXX/6666" --environment production --visibility plaintext
 ```
 
 *(Remember to commit and push `app.json` after `eas init` adds your `projectId`!)*

@@ -1,6 +1,28 @@
 {
   "extends": "expo/tsconfig.base",
   "compilerOptions": {
-    "strict": true
-  }
+    "strict": true,
+    "paths": {
+      "@gamerboy/core": ["./packages/core/src/index.ts"],
+      "@gamerboy/core/*": ["./packages/core/src/*"],
+      "@gamerboy/card-kit": ["./packages/card-kit/src/index.ts"],
+      "@gamerboy/card-kit/*": ["./packages/card-kit/src/*"],
+      "@gamerboy/monetization": ["./packages/monetization/src/index.ts"],
+      "@gamerboy/monetization/*": ["./packages/monetization/src/*"],
+      "@gamerboy/multiplayer": ["./packages/multiplayer/src/index.ts"],
+      "@gamerboy/multiplayer/*": ["./packages/multiplayer/src/*"]
+    }
+  },
+  "include": [
+    "apps/**/*.ts",
+    "apps/**/*.tsx",
+    "packages/**/*.ts",
+    "packages/**/*.tsx"
+  ],
+  "exclude": [
+    "node_modules",
+    "**/node_modules",
+    "dist",
+    "web-build"
+  ]
 }

@@ -1,35 +1,24 @@
 {
-  "name": "gamerboy",
+  "name": "gamerboy-studio",
   "version": "1.0.0",
-  "main": "index.ts",
-  "dependencies": {
-    "@react-native-async-storage/async-storage": "2.2.0",
-    "eslint": "^9.39.5",
-    "eslint-config-expo": "~58.0.4",
-    "expo": "~58.0.26",
-    "expo-haptics": "~58.0.8",
-    "expo-linear-gradient": "~58.0.4",
-    "expo-status-bar": "~58.0.5",
-    "expo-tracking-transparency": "~58.1.0",
-    "react": "19.3.0",
-    "react-dom": "19.3.0",
-    "react-native": "0.88.1",
-    "react-native-google-mobile-ads": "^17.4.0",
-    "react-native-safe-area-context": "~5.11.1",
-    "react-native-web": "^0.21.4"
+  "private": true,
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "start": "npm --workspace=@gamerboy/solitaire run start",
+    "ios": "npm --workspace=@gamerboy/solitaire run ios",
+    "android": "npm --workspace=@gamerboy/solitaire run android",
+    "web": "npm --workspace=@gamerboy/solitaire run web",
+    "lint": "eslint apps packages",
+    "typecheck": "tsc --noEmit",
+    "test": "npm --workspace=@gamerboy/solitaire run test"
   },
   "devDependencies": {
     "@types/react": "~19.3.0",
+    "eslint": "^9.39.5",
+    "eslint-config-expo": "~58.0.4",
     "typescript": "~6.0.3"
-  },
-  "scripts": {
-    "start": "expo start",
-    "android": "expo start --android",
-    "ios": "expo start --ios",
-    "web": "expo start --web",
-    "typecheck": "tsc --noEmit",
-    "test": "tsc --ignoreConfig tests/engine.test.ts --outDir /tmp/gamerboy-tests --module commonjs --target es2022 --esModuleInterop && node /tmp/gamerboy-tests/tests/engine.test.js",
-    "lint": "expo lint"
-  },
-  "private": true
+  }
 }
