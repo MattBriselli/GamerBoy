@@ -16,10 +16,15 @@ Living backlog. Agents: surface the open items here at the end of each GamerBoy 
 - [ ] Decide feature graphic tagline ("Every deal winnable" vs. "Winnable deals on demand")
 
 ## 💰 Monetization (AdMob)
-- [ ] Create AdMob account + payments/tax profile
-- [ ] Add Solitaire (Android) as unpublished app; create banner, interstitial, rewarded units
-- [ ] Set the `EXPO_PUBLIC_ADMOB_*` EAS env vars + replace test App IDs in `apps/solitaire/app.json` (switch on for production, keep test ads for closed test)
-- [ ] After Play listing is live: link app to store in AdMob, publish `docs/app-ads.txt` with real pub ID
+- [x] Create AdMob account (publisher `pub-9445578878788319`) — payments/tax profile still to confirm
+- [x] Add Solitaire (Android) as unpublished app (`ca-app-pub-9445578878788319~1228453500`); create banner, interstitial, rewarded units
+- [x] Android banner live via EAS env `EXPO_PUBLIC_ADMOB_ANDROID_BANNER_ID` (`…/8260444915`); real Android App ID in `app.json`
+- [ ] **On hold (banner-only for now):** enable interstitial + rewarded by setting EAS env vars and rebuilding — no code change needed
+  - `EXPO_PUBLIC_ADMOB_ANDROID_INTERSTITIAL_ID=ca-app-pub-9445578878788319/7083415417`
+  - `EXPO_PUBLIC_ADMOB_ANDROID_REWARDED_ID=ca-app-pub-9445578878788319/4704664089`
+- [ ] iOS: create iOS AdMob app + units, replace test `iosAppId` in `app.json` (when Apple account is paid)
+- [x] Publish `docs/app-ads.txt` with real pub ID
+- [ ] After Play listing is live: link app to store in AdMob
 - [ ] GDPR/UK consent message in AdMob Privacy & messaging
 
 ## 🍎 iOS (later — after Android ad data looks good)
